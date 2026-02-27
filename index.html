@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>ОП Ассистент — Острый Панкреатит</title>
+<title>Pancrea-Score — Острый Панкреатит</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -150,7 +150,7 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
 <div class="hdr">
   <div class="logo">🔬</div>
   <div>
-    <div class="logo-t">ОП Ассистент</div>
+    <div class="logo-t">Pancrea-Score</div>
     <div class="logo-s">Острый Панкреатит · Оценка тяжести</div>
   </div>
   <div id="dbadge" class="dbadge warn">⚠ 0/3</div>
@@ -175,9 +175,13 @@ var ST = {
 
 var DDEF={
   temp:'',hr:'',rr:'',sbp:'',dbp:'',uo:'',gcs:'15',men:'normal',vaso:'none',
+  sirs_type:'none',
   urea:'',na:'',k:'',creat:'',bili:'',wbc:'',hct:'',plt:'',alb:'',tp:'',crp:'',
+  gluc:'',hb:'',ldh:'',ast:'',ca:'',basedef:'',fluidseq:'',
   ph:'',pao2:'',fio2:'0.21',
-  ctg:'0',nec:'none',ext:'no',ple:'no',arf:'no'
+  ctg:'0',nec:'none',ext:'no',ple:'no',arf:'no',
+  dzh_peritoneal:'no',dzh_enceph:'no',dzh_ecg:'no',dzh_exudate:'no',
+  dzh_parapanc:'no',dzh_steatonec:'no',dzh_nofluid:'no'
 };
 
 function D(tp){ if(!ST.data[tp]||ST.data[tp].temp===undefined){ST.data[tp]=JSON.parse(JSON.stringify(DDEF));} return ST.data[tp]; }
@@ -332,8 +336,70 @@ function calc(tp){
 }
 
 // ═══════════════════════════════════════════════
-// ШАГИ
+// RANSON SCORE
 // ═══════════════════════════════════════════════
+function calcRanson(){
+  var d24=D('24h'), d48=D('48h');
+  var age=pf(ST.pat.age)||0;
+  var pts=[];
+
+  // При поступлении (24ч)
+  var r1=age>55; pts.push({lbl:'Возраст >55 лет',val:r1});
+  var wbc24=pf(d24.wbc); var r2=wbc24!==null&&wbc24>16; pts.push({lbl:'Лейкоциты >16×10⁹/л',val:r2});
+  var gluc24=pf(d24.gluc); var r3=gluc24!==null&&gluc24>11.1; pts.push({lbl:'Глюкоза >11.1 ммоль/л',val:r3});
+  var ldh24=pf(d24.ldh); var r4=ldh24!==null&&ldh24>350; pts.push({lbl:'ЛДГ >350 МЕ/л',val:r4});
+  var ast24=pf(d24.ast); var r5=ast24!==null&&ast24>250; pts.push({lbl:'АСТ >250 МЕ/л',val:r5});
+
+  // Через 48 часов
+  var hct24=pf(d24.hct), hct48=pf(d48.hct);
+  var r6=(hct24!==null&&hct48!==null)?(hct24-hct48>10):false;
+  pts.push({lbl:'Снижение Ht >10% за 48ч',val:r6,note:'48ч'});
+
+  var urea24=pf(d24.urea), urea48=pf(d48.urea);
+  var r7=(urea24!==null&&urea48!==null)?(urea48-urea24>1.8):false;
+  pts.push({lbl:'Рост мочевины >1.8 ммоль/л за 48ч',val:r7,note:'48ч'});
+
+  var ca48=pf(d48.ca); var r8=ca48!==null&&ca48<2.0; pts.push({lbl:'Ca <2.0 ммоль/л (48ч)',val:r8,note:'48ч'});
+  var pao248=pf(d48.pao2); var r9=pao248!==null&&pao248<60; pts.push({lbl:'PaO₂ <60 мм рт.ст. (48ч)',val:r9,note:'48ч'});
+  var bd48=pf(d48.basedef); var r10=bd48!==null&&bd48>4; pts.push({lbl:'Дефицит оснований >4 мэкв/л (48ч)',val:r10,note:'48ч'});
+  var fs48=pf(d48.fluidseq); var r11=fs48!==null&&fs48>6; pts.push({lbl:'Секвестрация жидкости >6 л (48ч)',val:r11,note:'48ч'});
+
+  var score=pts.filter(function(p){return p.val;}).length;
+  var mort=score<=2?'<1%':score<=4?'~15%':score<=6?'~40%':'>50%';
+  var sev=score<=2?'g':score<=4?'y':'r';
+  var sevLbl=score<=2?'Лёгкий':score<=4?'Средней тяжести':score<=6?'Тяжёлый':'Крайне тяжёлый';
+  return {score,pts,mort,sev,sevLbl};
+}
+
+// ═══════════════════════════════════════════════
+// ШКАЛА ДЖАНЕЛИДЗЕ
+// ═══════════════════════════════════════════════
+function calcDzhanelidge(tp){
+  var d=D(tp);
+  var crit=[];
+  var sbp=pf(d.sbp), uo=pf(d.uo), wbc=pf(d.wbc), gluc=pf(d.gluc), urea=pf(d.urea), hb=pf(d.hb);
+
+  crit.push({lbl:'Перитонеальные симптомы',       auto:false, val:d.dzh_peritoneal==='yes'});
+  crit.push({lbl:'Олигурия <250 мл/12ч',          auto:true,  val:uo!==null&&uo<500, hint:uo?uo+' мл/сут':'нет данных'});
+  crit.push({lbl:'АД сист. <100 мм рт.ст.',       auto:true,  val:sbp!==null&&sbp<100, hint:sbp?sbp+' мм рт.ст.':'нет данных'});
+  crit.push({lbl:'Энцефалопатия',                 auto:false, val:d.dzh_enceph==='yes'});
+  crit.push({lbl:'Hb >160 г/л',                   auto:true,  val:hb!==null&&hb>160, hint:hb?hb+' г/л':'нет данных'});
+  crit.push({lbl:'Лейкоциты >14 000/мкл',         auto:true,  val:wbc!==null&&wbc>14, hint:wbc?wbc+'×10⁹/л':'нет данных'});
+  crit.push({lbl:'Глюкоза >10 ммоль/л',           auto:true,  val:gluc!==null&&gluc>10, hint:gluc?gluc+' ммоль/л':'нет данных'});
+  crit.push({lbl:'Мочевина >12 ммоль/л',          auto:true,  val:urea!==null&&urea>12, hint:urea?urea+' ммоль/л':'нет данных'});
+  crit.push({lbl:'Метаболич. изменения на ЭКГ',   auto:false, val:d.dzh_ecg==='yes'});
+  crit.push({lbl:'Вишнёвый/чёрный экссудат (лапароскопия)',auto:false,val:d.dzh_exudate==='yes'});
+  crit.push({lbl:'Распространённый парапанкреатит (выходит из сальниковой сумки)',auto:false,val:d.dzh_parapanc==='yes'});
+  crit.push({lbl:'Стеатонекрозы',                  auto:false, val:d.dzh_steatonec==='yes'});
+  crit.push({lbl:'Нет эффекта от инфузионной терапии',auto:false,val:d.dzh_nofluid==='yes'});
+
+  var score=crit.filter(function(c){return c.val;}).length;
+  var sev=score>=5?'r':score>=2?'y':'g';
+  var sevLbl=score>=5?'Тяжёлый':score>=2?'Средней тяжести':'Лёгкий';
+  return {score,crit,sev,sevLbl};
+}
+
+
 var STEPS=[
   {id:'diag',   lbl:'Диагноз',    ico:'🩻'},
   {id:'pat',    lbl:'Пациент',    ico:'👤'},
@@ -616,6 +682,75 @@ function pageVitals(){
       ])+'</div>'+
     '</div>'+
   '</div>'+
+
+  // SIRS — отдельная оценка
+  (function(){
+    var d2=D(tp);
+    var sc2=calc(tp);
+    var sirsN=sc2.sirs;
+    var sirsC=sirsN>=3?'var(--r)':sirsN>=2?'var(--y)':'var(--g)';
+    var sirsType=d2.sirs_type||'none';
+    var mortSirs=sirsType==='persistent'?'25.4%':sirsType==='transient'?'8%':'—';
+    var mortC=sirsType==='persistent'?'var(--r)':sirsType==='transient'?'var(--y)':'var(--t3)';
+    return '<div class="card">'+
+      '<div class="ch"><span>🔥</span><span class="ct">SIRS — Синдром системного воспалительного ответа</span></div>'+
+      '<div class="cb">'+
+        '<div class="ib" style="margin-bottom:10px">'+
+          '<b>Критерии SIRS (текущие данные: '+sirsN+'/4):</b>'+
+          '<div style="margin-top:5px;display:grid;grid-template-columns:1fr 1fr;gap:3px;font-size:11px">'+
+            '<span style="color:'+(pf(d2.temp)!==null&&(pf(d2.temp)>38||pf(d2.temp)<36)?'var(--r)':'var(--t3)')+'">'+
+              '① Т >38 или <36°C'+(pf(d2.temp)?' ('+pf(d2.temp)+'°C)':' —')+'</span>'+
+            '<span style="color:'+(pf(d2.hr)!==null&&pf(d2.hr)>90?'var(--r)':'var(--t3)')+'">'+
+              '② ЧСС >90'+(pf(d2.hr)?' ('+pf(d2.hr)+')':' —')+'</span>'+
+            '<span style="color:'+(pf(d2.rr)!==null&&pf(d2.rr)>20?'var(--r)':'var(--t3)')+'">'+
+              '③ ЧДД >20'+(pf(d2.rr)?' ('+pf(d2.rr)+')':' —')+'</span>'+
+            '<span style="color:'+(pf(d2.wbc)!==null&&(pf(d2.wbc)>12||pf(d2.wbc)<4)?'var(--r)':'var(--t3)')+'">'+
+              '④ Лейк. >12 или <4'+(pf(d2.wbc)?' ('+pf(d2.wbc)+')':' —')+'</span>'+
+          '</div>'+
+          '<div style="margin-top:6px;font-size:13px;font-weight:700;color:'+sirsC+'">'+
+            sirsN+'/4 критерия'+(sirsN>=2?' — SIRS подтверждён':'')+'</div>'+
+        '</div>'+
+        '<div class="sl">Продолжительность SIRS (для оценки летальности)</div>'+
+        '<div class="tg">'+
+          '<button class="tb'+(sirsType==='none'?' on':'')+'" onclick="sDR(\''+tp+'\',\'sirs_type\',\'none\')">Нет / Не оценено</button>'+
+          '<button class="tb'+(sirsType==='transient'?' on':'')+'" onclick="sDR(\''+tp+'\',\'sirs_type\',\'transient\')">⏱ Транзиторный (&lt;48 ч)</button>'+
+          '<button class="tb'+(sirsType==='persistent'?' onr':'')+'" onclick="sDR(\''+tp+'\',\'sirs_type\',\'persistent\')">🔴 Персистирующий (≥48 ч)</button>'+
+        '</div>'+
+        (sirsType!=='none'?
+          '<div style="margin-top:9px;padding:9px 12px;border-radius:7px;background:'+mortC+'18;border:1px solid '+mortC+'44;font-size:13px">'+
+            '<b style="color:'+mortC+'">Летальность: '+mortSirs+'</b>'+
+            '<span style="font-size:11px;color:var(--t2);margin-left:8px">doi: 10.1002/bjs.5290</span>'+
+            (sirsType==='persistent'?'<div style="font-size:11px;color:var(--t2);margin-top:4px">⚠ Персистирующий SIRS — независимый предиктор органной недостаточности. Реклассифицировать в тяжёлый ОП.</div>':'<div style="font-size:11px;color:var(--t2);margin-top:4px">✓ Транзиторный SIRS (разрешается &lt;48ч) — умеренно-тяжёлый ОП.</div>')+
+          '</div>'
+        :'')+
+        (sirsN>=2?'<div class="al al-i" style="margin-top:10px;margin-bottom:0">📋 <b>Рекомендации 2025 (DOI: 10.1016/j.pan.2025.01.010):</b> Наличие SIRS + местные осложнения по КТ достаточны для классификации умеренно-тяжёлого ОП без органной недостаточности.</div>':'')+
+      '</div>'+
+    '</div>';
+  })()+
+
+  // Шкала Джанелидзе — клинические признаки
+  (function(){
+    var d2=D(tp);
+    var keys=['dzh_peritoneal','dzh_enceph','dzh_ecg','dzh_exudate','dzh_parapanc','dzh_steatonec','dzh_nofluid'];
+    var lbls=['Перитонеальные симптомы','Энцефалопатия','Метаболич. изменения на ЭКГ',
+              'Вишнёвый/коричнево-чёрный экссудат (лапаро-я)','Распространённый парапанкреатит (за сальниковую сумку)',
+              'Стеатонекрозы','Нет эффекта от инфузионной терапии'];
+    var items=keys.map(function(k,i){
+      var on=d2[k]==='yes';
+      return '<div class="crit'+(on?' on':'')+'" onclick="sDR(\''+tp+'\',\''+k+'\','+(on?'\'no\'':'\'yes\'')+')">'+
+        '<div class="cbox">'+(on?'<span style="font-size:13px;color:#000">✓</span>':'')+'</div>'+
+        '<div><div class="ctit" style="font-size:13px">'+lbls[i]+'</div></div>'+
+      '</div>';
+    }).join('');
+    return '<div class="card">'+
+      '<div class="ch"><span>📋</span><span class="ct">Шкала Джанелидзе — клинические признаки</span></div>'+
+      '<div class="cb">'+
+        '<div class="al al-i" style="margin-bottom:10px">Отметьте клинические признаки. Лабораторные критерии рассчитываются автоматически из введённых данных.</div>'+
+        items+
+      '</div>'+
+    '</div>';
+  })()+
+
   nav2('← Назад','Далее → Анализы')+
   '</div>';
 }
@@ -672,6 +807,34 @@ function pageLabs(){
       '<div style="margin-top:11px">'+dSel('ОПН (для APACHE II)',tp,'arf',[['no','Нет'],['yes','Есть (×2 к баллу кр-на)']])+'</div>'+
     '</div>'+
   '</div>'+
+
+  // Новые поля для Ranson и Джанелидзе
+  '<div class="card">'+
+    '<div class="ch"><span>🔬</span><span class="ct">Шкала Ranson + Джанелидзе — дополнительные показатели</span></div>'+
+    '<div class="cb">'+
+      '<div class="sl">Ферменты и глюкоза (поступление — 24ч)</div>'+
+      '<div class="fg">'+
+        dInp('Глюкоза',tp,'gluc','ммоль/л',{step:'0.1'})+
+        dInp('Гемоглобин (Hb)',tp,'hb','г/л',{step:'1'})+
+        dInp('ЛДГ',tp,'ldh','МЕ/л',{step:'1'})+
+        dInp('АСТ',tp,'ast','МЕ/л',{step:'1'})+
+      '</div>'+
+      (pf(D(tp).gluc)?'<div class="fconv">Глюкоза '+(pf(D(tp).gluc)>11.1?'<b style="color:var(--r)">⚠ >11.1 ммоль/л — Ranson +1</b>':'в норме')+'</div>':'')+
+      (pf(D(tp).hb)?'<div class="fconv">Hb '+(pf(D(tp).hb)>160?'<b style="color:var(--r)">⚠ >160 г/л — Джанелидзе +1</b>':'в норме для Джанелидзе')+'</div>':'')+
+      (pf(D(tp).ldh)?'<div class="fconv">ЛДГ '+(pf(D(tp).ldh)>350?'<b style="color:var(--r)">⚠ >350 МЕ/л — Ranson +1</b>':'в норме')+'</div>':'')+
+      (pf(D(tp).ast)?'<div class="fconv">АСТ '+(pf(D(tp).ast)>250?'<b style="color:var(--r)">⚠ >250 МЕ/л — Ranson +1</b>':'в норме')+'</div>':'')+
+
+      '<div class="sl" style="margin-top:13px">Параметры через 48ч (для Ranson 48ч-критериев)</div>'+
+      '<div class="fg">'+
+        dInp('Ca²⁺',tp,'ca','ммоль/л',{step:'0.1'})+
+        dInp('Дефицит оснований',tp,'basedef','мэкв/л',{step:'0.1'})+
+        dInp('Секвестрация жидкости',tp,'fluidseq','л за 48ч',{step:'0.1'})+
+      '</div>'+
+      (pf(D(tp).ca)?'<div class="fconv">Ca '+(pf(D(tp).ca)<2.0?'<b style="color:var(--r)">⚠ <2.0 ммоль/л — Ranson 48ч +1</b>':'в норме')+'</div>':'')+
+      (pf(D(tp).basedef)?'<div class="fconv">Дефицит оснований '+(pf(D(tp).basedef)>4?'<b style="color:var(--r)">⚠ >4 мэкв/л — Ranson 48ч +1</b>':'в норме')+'</div>':'')+
+    '</div>'+
+  '</div>'+
+
   nav2('← Назад','Далее → КЩС и КТ')+
   '</div>';
 }
@@ -715,7 +878,8 @@ function pageGas(){
       ])+'</div>'+
       dSel('Внепанкреатические осложнения',tp,'ext',[['no','Нет (0 б)'],['yes','Есть: выпот / тромбоз / псевдоаневризма (+2 б)']])+
       '<div class="ib" style="margin-top:9px">mCTSI = Balthazar '+ctg+' + Некроз '+(nm[d.nec]||0)+' + Внепанкр. '+(d.ext==='yes'?2:0)+' = <b style="color:var(--c)">'+mctsi+' / 10</b> → '+
-        (mctsi<=2?'<span style="color:var(--g)">Лёгкий</span>':mctsi<=6?'<span style="color:var(--y)">Средний</span>':'<span style="color:var(--r)">Тяжёлый</span>')+
+        (mctsi<=1?'<span style="color:var(--g)">Лёгкий · летальность ~0%</span>':mctsi<=3?'<span style="color:var(--g)">Лёгкий · летальность ~3%</span>':mctsi<=6?'<span style="color:var(--y)">Средний · летальность ~6%</span>':'<span style="color:var(--r)">Тяжёлый · летальность ~17%</span>')+
+        '<span style="font-size:10px;color:var(--t3);margin-left:6px">doi: 0.3389/fphys.2019.01002</span>'+
       '</div>'+
     '</div>'+
   '</div>'+
@@ -749,9 +913,24 @@ function pageScores(){
   var biSev=sc.bisap>=3?'Тяжёлый':sc.bisap>=2?'Средней тяжести':'Лёгкий';
   var apSev=sc.apache>=20?'Крайне тяжёлый':sc.apache>=12?'Тяжёлый':sc.apache>=8?'Средней тяжести':'Лёгкий';
   var soSev=sc.sofa>=7?'Полиорганная нед.':sc.sofa>=4?'Тяжёлая дисф.':sc.sofa>=2?'Умеренная дисф.':'Минимальная';
-  var mcSev=sc.mctsi>=7?'Тяжёлый':sc.mctsi>=4?'Средней тяжести':'Лёгкий';
+  var mcSev=sc.mctsi>=7?'Тяжёлый':sc.mctsi>=4?'Средней тяжести':sc.mctsi>=2?'Лёгкий':'Лёгкий';
+  var mcMort=sc.mctsi>=7?'~17%':sc.mctsi>=4?'~6%':sc.mctsi>=2?'~3%':'<1%';
 
-  var sev=sc.apache>=8||sc.bisap>=3||sc.sofa>=6?'r':sc.apache>=5||sc.bisap>=2||sc.sofa>=3?'y':'g';
+  // SIRS
+  var sirsType=d.sirs_type||'none';
+  var sirsMort=sirsType==='persistent'?'25.4%':sirsType==='transient'?'8%':'—';
+  var sirsC2=sirsType==='persistent'?'var(--r)':sirsType==='transient'?'var(--y)':'var(--t3)';
+
+  // Ranson
+  var ran=calcRanson();
+  var ranC=ran.sev==='r'?'var(--r)':ran.sev==='y'?'var(--y)':'var(--g)';
+
+  // Джанелидзе
+  var dzh=calcDzhanelidge(tp);
+  var dzhC=dzh.sev==='r'?'var(--r)':dzh.sev==='y'?'var(--y)':'var(--g)';
+
+  var sev=sc.apache>=8||sc.bisap>=3||sc.sofa>=6||ran.score>=3||dzh.score>=5?'r':
+          sc.apache>=5||sc.bisap>=2||sc.sofa>=3||ran.score>=2||dzh.score>=2?'y':'g';
   var sevC=sev==='r'?'var(--r)':sev==='y'?'var(--y)':'var(--g)';
   var sevL=sev==='r'?'🚨 ТЯЖЁЛЫЙ ОП':sev==='y'?'⚠️ СРЕДНЕЙ ТЯЖЕСТИ':'✅ ЛЁГКИЙ ОП';
 
@@ -781,13 +960,64 @@ function pageScores(){
     ['Кардио (вазопрессоры/MAP)',sc.cardio+'/4',sc.cardio>=3?'var(--r)':sc.cardio>=2?'var(--y)':'var(--t2)'],
     ['ЦНС (ШКГ)',sc.cns+'/4'],
     ['Почки (кр-н мкмоль/л / диурез)',sc.renal+'/4',sc.renal>=3?'var(--r)':sc.renal>=2?'var(--y)':'var(--t2)']
-  ],soSev)+
+  ],soSev,(sc.sofa>=2?'⚠ SOFA ≥2 → летальность >10%':'SOFA <2 → летальность <10%'))+
 
   scCard('mCTSI','Modified CT Severity Index',sc.mctsi,sc.mcC,[
     ['Balthazar (A→E)',sc.ctg+' / 4'],
     ['Некроз ПЖ',sc.mctsi-sc.ctg-(d.ext==='yes'?2:0)+' / 6'],
     ['Внепанкреат. осл.',d.ext==='yes'?'2 / 2':'0 / 2']
-  ],mcSev,'0–2: лёгкий · 3–6: средний · 7–10: тяжёлый')+
+  ],mcSev,'Летальность ≈ '+mcMort+' · doi: 10.3389/fphys.2019.01002')+
+
+  // Ranson
+  scCard('Ranson','Критерии Ranson (при поступлении + 48ч)',ran.score,ranC,[
+    ['Возраст >55 лет',ran.pts[0].val?'+1':'0',ran.pts[0].val?'var(--r)':'var(--t2)'],
+    ['Лейкоциты >16×10⁹/л',ran.pts[1].val?'+1':'0',ran.pts[1].val?'var(--r)':'var(--t2)'],
+    ['Глюкоза >11.1 ммоль/л',ran.pts[2].val?'+1':'0',ran.pts[2].val?'var(--r)':'var(--t2)'],
+    ['ЛДГ >350 МЕ/л',ran.pts[3].val?'+1':'0',ran.pts[3].val?'var(--r)':'var(--t2)'],
+    ['АСТ >250 МЕ/л',ran.pts[4].val?'+1':'0',ran.pts[4].val?'var(--r)':'var(--t2)'],
+    ['↓Ht >10% за 48ч',ran.pts[5].val?'+1':'0',ran.pts[5].val?'var(--r)':'var(--t2)'],
+    ['↑Мочевина >1.8 ммоль/л за 48ч',ran.pts[6].val?'+1':'0',ran.pts[6].val?'var(--r)':'var(--t2)'],
+    ['Ca <2.0 ммоль/л (48ч)',ran.pts[7].val?'+1':'0',ran.pts[7].val?'var(--r)':'var(--t2)'],
+    ['PaO₂ <60 мм рт.ст. (48ч)',ran.pts[8].val?'+1':'0',ran.pts[8].val?'var(--r)':'var(--t2)'],
+    ['Дефицит осн. >4 мэкв/л (48ч)',ran.pts[9].val?'+1':'0',ran.pts[9].val?'var(--r)':'var(--t2)'],
+    ['Секвестр. жидкости >6 л (48ч)',ran.pts[10].val?'+1':'0',ran.pts[10].val?'var(--r)':'var(--t2)']
+  ],ran.sevLbl,'Летальность: ≤2 б → <1% · 3–4 б → ~15% · 5–6 б → ~40% · ≥7 б → >50%')+
+
+  // Шкала Джанелидзе
+  (function(){
+    var dz=calcDzhanelidge(tp);
+    var c=dzhC;
+    var rows=dz.crit.map(function(cr){
+      return [cr.lbl+(cr.auto&&cr.hint?' ('+cr.hint+')':''),cr.val?'+1':'0',cr.val?'var(--r)':'var(--t2)'];
+    });
+    return scCard('Джанелидзе','Шкала Джанелидзе (инфицированный некроз)',dz.score,c,rows,
+      dz.sevLbl,'0–1: лёгкий · 2–4: средней тяжести · ≥5: тяжёлый');
+  })()+
+
+  // SIRS отдельная карточка
+  '<div class="sc" style="border-color:'+sirsC2+'44">'+
+    '<div class="sch" style="background:'+sirsC2+'12;border-color:'+sirsC2+'33">'+
+      '<div><div class="scn">SIRS</div><div class="scfn">Системный воспалительный ответ</div></div>'+
+      '<div class="scv" style="color:'+sirsC2+'">'+sc.sirs+'/4</div>'+
+    '</div>'+
+    '<div class="scb">'+
+      ['Т >38 или <36°C','ЧСС >90/мин','ЧДД >20/мин','Лейк. >12 или <4×10⁹/л'].map(function(lbl,i){
+        var v=[pf(d.temp)!==null&&(pf(d.temp)>38||pf(d.temp)<36),
+               pf(d.hr)!==null&&pf(d.hr)>90,
+               pf(d.rr)!==null&&pf(d.rr)>20,
+               pf(d.wbc)!==null&&(pf(d.wbc)>12||pf(d.wbc)<4)][i];
+        return '<div class="sr"><span class="srl">'+lbl+'</span><span class="srv" style="color:'+(v?'var(--r)':'var(--t2)')+'">'+( v?'✓ Да':'—')+'</span></div>';
+      }).join('')+
+      '<div class="sr"><span class="srl">Продолжительность</span><span class="srv" style="color:'+sirsC2+'">'+
+        (sirsType==='persistent'?'🔴 Персистирующий':sirsType==='transient'?'⏱ Транзиторный':'Не указана')+
+      '</span></div>'+
+      (sirsType!=='none'?
+        '<div class="svrd" style="background:'+sirsC2+'15;border-color:'+sirsC2+'33">'+
+          '<div class="svt" style="color:'+sirsC2+'">Летальность: '+sirsMort+'</div>'+
+          '<div class="svs">doi: 10.1002/bjs.5290 · транзит. 8% · персист. 25.4%</div>'+
+        '</div>':'')+
+    '</div>'+
+  '</div>'+
 
   // NAPP + CRP
   '<div class="sc" style="border-color:'+(sc.napp&&parseFloat(sc.napp)>30?'var(--r)':'var(--bd)')+'44">'+
@@ -817,14 +1047,18 @@ function pageScores(){
       '<div><div class="scn" style="font-size:16px">'+sevL+'</div><div class="scfn">Итоговая оценка · '+tp+'</div></div>'+
     '</div>'+
     '<div class="scb">'+
-      '<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:12px">'+
-        [['BISAP',sc.bisap,'/5'],['APACHE II',sc.apache,''],['SOFA',sc.sofa,'/24'],['mCTSI',sc.mctsi,'/10']].map(function(x){
+      '<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:12px">'+
+        [['BISAP',sc.bisap,'/5'],['APACHE II',sc.apache,''],['SOFA',sc.sofa,'/24'],['mCTSI',sc.mctsi,'/10'],['Ranson',ran.score,'/11'],['Джанел.',dzh.score,'/13']].map(function(x){
           return '<div style="text-align:center">'+
             '<div style="font-size:10px;color:var(--t2);text-transform:uppercase">'+x[0]+'</div>'+
-            '<div style="font-size:24px;font-weight:700;font-family:\'Courier New\';color:'+sevC+'">'+x[1]+'<span style="font-size:12px;color:var(--t3)">'+x[2]+'</span></div>'+
+            '<div style="font-size:22px;font-weight:700;font-family:\'Courier New\';color:'+sevC+'">'+x[1]+'<span style="font-size:11px;color:var(--t3)">'+x[2]+'</span></div>'+
           '</div>';
         }).join('')+
       '</div>'+
+      (sirsType!=='none'?
+        '<div style="padding:7px 11px;border-radius:6px;background:'+sirsC2+'15;border:1px solid '+sirsC2+'33;font-size:12px;margin-top:4px">'+
+          '<b style="color:'+sirsC2+'">SIRS '+( sirsType==='persistent'?'персистирующий → летальность 25.4%':'транзиторный → летальность 8%')+'</b>'+
+        '</div>':'')+
     '</div>'+
   '</div>'+
 
@@ -842,6 +1076,8 @@ function pageDyn(){
     {lbl:'APACHE II',max:71,get:function(sc){return sc.apache;},gc:function(sc){return sc.apache>=12?'r':sc.apache>=8?'y':'g';}},
     {lbl:'SOFA',max:24,get:function(sc){return sc.sofa;},gc:function(sc){return sc.sofa>=7?'r':sc.sofa>=4?'y':'g';}},
     {lbl:'mCTSI',max:10,get:function(sc){return sc.mctsi;},gc:function(sc){return sc.mctsi>=7?'r':sc.mctsi>=4?'y':'g';}},
+    {lbl:'Ranson',max:11,getR:true,get:function(){return calcRanson().score;},gc:function(){var s=calcRanson().score;return s>=5?'r':s>=3?'y':'g';}},
+    {lbl:'Джанелидзе',max:13,getDzh:true,get:function(sc,t){return calcDzhanelidge(t).score;},gc:function(sc,t){var s=calcDzhanelidge(t).score;return s>=5?'r':s>=2?'y':'g';}},
     {lbl:'NAPP г/л',max:60,get:function(sc){return sc.napp?parseFloat(sc.napp):null;},gc:function(sc){return sc.napp&&parseFloat(sc.napp)>30?'r':'g';}},
     {lbl:'CРБ мг/л',max:400,get:function(sc){return sc.crp;},gc:function(sc){return sc.crp?(sc.crp>=150?'r':sc.crp>=100?'y':'g'):'g';}}
   ];
@@ -854,7 +1090,12 @@ function pageDyn(){
         '<thead><tr><th>Шкала</th>'+tps.map(function(t){return '<th style="color:var(--c);text-align:center">'+t+'</th>';}).join('')+'<th>Тренд</th></tr></thead>'+
         '<tbody>'+
           rows.map(function(row){
-            var vals=tps.map(function(t){return ST.data[t]&&ST.data[t].temp!==undefined?row.get(calc(t)):null;});
+            var vals=tps.map(function(t){
+              if(!ST.data[t]||ST.data[t].temp===undefined)return null;
+              if(row.getDzh)return calcDzhanelidge(t).score;
+              if(row.getR)return calcRanson().score;
+              return row.get(calc(t));
+            });
             var nums=vals.filter(function(v){return v!==null&&!isNaN(v);});
             var trend='—',tc='';
             if(nums.length>=2){
@@ -865,8 +1106,11 @@ function pageDyn(){
             }
             return '<tr><td style="font-weight:600">'+row.lbl+'</td>'+
               vals.map(function(v,i){
-                var sc2=ST.data[tps[i]]&&ST.data[tps[i]].temp!==undefined?calc(tps[i]):null;
-                var c=sc2?col(row.gc(sc2)):'var(--t3)';
+                var t2=tps[i];
+                var hasD=ST.data[t2]&&ST.data[t2].temp!==undefined;
+                var sc2=hasD?calc(t2):null;
+                var colorKey=row.getDzh?row.gc(null,t2):row.gc(sc2,t2);
+                var c=hasD?(colorKey==='r'?'var(--r)':colorKey==='y'?'var(--y)':'var(--g)'):'var(--t3)';
                 var pct=v!==null&&!isNaN(v)?Math.min(v/row.max*100,100):0;
                 return '<td style="text-align:center">'+
                   '<div class="tpv" style="color:'+c+'">'+(v!==null&&!isNaN(v)?v:'—')+'</div>'+
