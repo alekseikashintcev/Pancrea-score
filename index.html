@@ -158,22 +158,348 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
 <body>
 
 <div class="hdr">
-  <div class="logo">🔬</div>
+  <div class="logo" onclick="goHome()" style="cursor:pointer">🔬</div>
   <div>
     <div class="logo-t">Pancrea-Score</div>
     <div class="logo-s">Острый Панкреатит · Оценка тяжести</div>
   </div>
-  <div id="dbadge" class="dbadge warn">⚠ 0/3</div>
+  <button id="homebtn" onclick="goHome()" style="margin-left:auto;background:var(--bg3);border:1px solid var(--bd2);color:var(--t2);padding:5px 11px;border-radius:7px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap">👥 Пациенты</button>
+  <div id="dbadge" class="dbadge warn" style="margin-left:8px">⚠ 0/3</div>
 </div>
 <div class="snav" id="snav"></div>
 <div class="wrap" id="main"></div>
 
 <script>
-// ═══════════════════════════════════════════════
-// STATE — числа хранятся как строки, парсятся при расчёте
-// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// PANCREA-SCORE  ·  Система управления пациентами
+// ═══════════════════════════════════════════════════════════════
+var VIEW = 'home'; // 'home' | 'patient'
+
+// ── БАЗА ДАННЫХ (localStorage) ─────────────────────────────────
+var DB = {
+  KEY: 'pancrea_v3',
+  load: function(){
+    try{ return JSON.parse(localStorage.getItem(this.KEY)||'[]'); }
+    catch(e){ return []; }
+  },
+  saveAll: function(list){
+    try{ localStorage.setItem(this.KEY, JSON.stringify(list)); }catch(e){}
+  },
+  saveCurrent: function(){
+    if(VIEW!=='patient') return;
+    var list = DB.load();
+    var now  = Date.now();
+    var rec  = JSON.parse(JSON.stringify(ST));
+    if(!rec.id){ rec.id = 'p'+now; ST.id = rec.id; }
+    rec.savedAt   = rec.savedAt || now;
+    rec.updatedAt = now;
+    var idx = list.findIndex(function(x){ return x.id===rec.id; });
+    if(idx>=0) list[idx]=rec; else list.unshift(rec);
+    DB.saveAll(list);
+  },
+  del: function(id){
+    DB.saveAll(DB.load().filter(function(p){ return p.id!==id; }));
+  },
+  get: function(id){
+    return DB.load().find(function(p){ return p.id===id; })||null;
+  }
+};
+
+// ── ЭКСПОРТ / ИМПОРТ ────────────────────────────────────────────
+function exportLink(id){
+  var p = id ? DB.get(id) : JSON.parse(JSON.stringify(ST));
+  if(!p) return;
+  try{
+    var b64 = btoa(unescape(encodeURIComponent(JSON.stringify(p))));
+    var url = location.href.split('#')[0]+'#ps='+b64;
+    prompt('Ссылка для передачи коллеге (скопируйте):', url);
+  }catch(e){ alert('Ошибка создания ссылки'); }
+}
+function exportFile(id){
+  var p = id ? DB.get(id) : JSON.parse(JSON.stringify(ST));
+  if(!p) return;
+  var name = ((p.pat&&p.pat.initials?p.pat.initials.replace(/\s+/g,'_'):'patient')
+    +'_'+new Date(p.updatedAt||Date.now()).toISOString().slice(0,10));
+  var a = document.createElement('a');
+  a.href = 'data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(p,null,2));
+  a.download = name+'.json'; a.click();
+}
+function exportAllFile(){
+  var list = DB.load();
+  if(!list.length){ alert('Нет пациентов'); return; }
+  var a = document.createElement('a');
+  a.href = 'data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(list,null,2));
+  a.download = 'pancrea_all_'+new Date().toISOString().slice(0,10)+'.json'; a.click();
+}
+function importFile(){
+  var inp = document.createElement('input');
+  inp.type='file'; inp.accept='.json';
+  inp.onchange = function(){
+    var f=inp.files[0]; if(!f) return;
+    var r=new FileReader();
+    r.onload=function(e){
+      try{
+        var data = JSON.parse(e.target.result);
+        var recs = Array.isArray(data)?data:[data];
+        var list = DB.load(); var added=0;
+        recs.forEach(function(rec){
+          if(!rec||!rec.diag) return;
+          rec.id = 'p'+Date.now()+Math.floor(Math.random()*10000);
+          rec.savedAt = rec.updatedAt = Date.now();
+          list.unshift(rec); added++;
+        });
+        DB.saveAll(list);
+        alert('Импортировано: '+added+' пациент(ов)');
+        renderHome();
+      }catch(err){ alert('Ошибка файла: '+err.message); }
+    };
+    r.readAsText(f);
+  };
+  inp.click();
+}
+function importLink(){
+  var hash = location.hash;
+  if(!hash||hash.indexOf('#ps=')<0) return false;
+  try{
+    var rec = JSON.parse(decodeURIComponent(escape(atob(hash.replace('#ps=','')))));
+    if(!rec||!rec.diag) return false;
+    rec.id = 'p'+Date.now(); rec.savedAt=rec.updatedAt=Date.now();
+    var list=DB.load(); list.unshift(rec); DB.saveAll(list);
+    openPatient(rec.id); location.hash=''; return true;
+  }catch(e){ return false; }
+}
+
+// ── НАВИГАЦИЯ ────────────────────────────────────────────────────
+function goHome(){
+  DB.saveCurrent();
+  VIEW='home';
+  renderFull();
+}
+function openPatient(id){
+  var rec = DB.get(id);
+  if(!rec) return;
+  ST = JSON.parse(JSON.stringify(rec));
+  if(typeof ST.step!=='number') ST.step=0;
+  VIEW='patient';
+  renderFull();
+  window.scrollTo(0,0);
+}
+function renderFull(){
+  var hb = document.getElementById('homebtn');
+  var badge = document.getElementById('dbadge');
+  var nav = document.getElementById('snav');
+  var isP = VIEW==='patient';
+  if(hb) hb.style.display = isP?'':'none';
+  if(badge) badge.style.display = isP?'':'none';
+  if(nav) nav.style.display = isP?'':'none';
+  if(VIEW==='home') renderHome();
+  else R();
+}
+
+// ── ДОМ: СПИСОК ПАЦИЕНТОВ ────────────────────────────────────────
+function renderHome(){
+  document.getElementById('main').innerHTML = buildHome();
+}
+
+function patAbbr(initials){
+  if(!initials) return '?';
+  var parts=initials.trim().split(/\s+/);
+  if(parts.length>=3) return ((parts[0][0]||'')+(parts[1][0]||'')+(parts[2][0]||'')).toUpperCase();
+  if(parts.length===2) return (parts[0].substring(0,2)+(parts[1][0]||'')).toUpperCase();
+  return initials.substring(0,3).toUpperCase();
+}
+
+function patScores(p){
+  // Возвращает {tp: {sc, ran, dzh, sev}} для каждого заполненного таймпоинта
+  var origST=ST, out={};
+  ST=p;
+  ['24h','48h','72h'].forEach(function(tp){
+    var d=p.data&&p.data[tp];
+    if(!d||d.temp===undefined) return;
+    out[tp]={sc:calc(tp), ran:calcRanson(), dzh:calcDzhanelidge(tp)};
+    var sc=out[tp].sc,ran=out[tp].ran;
+    out[tp].sev = sc.apache>=8||sc.bisap>=3||sc.sofa>=6||ran.score>=3 ? 'r'
+                : sc.apache>=5||sc.bisap>=2||sc.sofa>=3||ran.score>=2 ? 'y' : 'g';
+  });
+  ST=origST;
+  return out;
+}
+
+function buildHome(){
+  var list = DB.load();
+  var origST=ST;
+
+  // Статистика
+  var total=list.length, heavy=0, mid=0, light=0;
+  list.forEach(function(p){
+    var sc=patScores(p);
+    var tps=['72h','48h','24h'];
+    for(var i=0;i<tps.length;i++){
+      if(sc[tps[i]]){
+        var sev=sc[tps[i]].sev;
+        if(sev==='r')heavy++;else if(sev==='y')mid++;else light++;
+        break;
+      }
+    }
+  });
+  ST=origST;
+
+  var etioMap={biliary:'ЖКБ',aliment:'Алимент.',hypertg:'Гипертриг.',
+    ercp:'ЭРХПГ',drug:'Медикам.',trauma:'Травма',autoimmune:'Аутоимм.',idio:'Идиопат.'};
+
+  // ── Строки таблицы пациентов
+  var rows = list.map(function(p){
+    var p2=p.pat||{};
+    var abbr=patAbbr(p2.initials);
+    var sc=patScores(p);
+    var lastSev='g', lastSevL='Лёгкий';
+    ['72h','48h','24h'].forEach(function(tp){
+      if(sc[tp]&&!sc['_found']){sc['_found']=true;lastSev=sc[tp].sev;lastSevL=sc[tp].sev==='r'?'Тяжёлый':sc[tp].sev==='y'?'Средний':'Лёгкий';}
+    });
+    var sevC=lastSev==='r'?'var(--r)':lastSev==='y'?'var(--y)':'var(--g)';
+    var saved=new Date(p.updatedAt||p.savedAt||0).toLocaleDateString('ru-RU');
+
+    function tpCell(tp){
+      if(!sc[tp]) return '<td style="text-align:center;color:var(--t3);border:1px solid var(--bd);padding:6px">—</td>';
+      var c=sc[tp].sev==='r'?'var(--r)':sc[tp].sev==='y'?'var(--y)':'var(--g)';
+      var s=sc[tp].sc;
+      return '<td style="text-align:center;border:1px solid var(--bd);padding:5px 8px">'+
+        '<div style="font-family:\'Courier New\';font-weight:700;font-size:12px;color:'+c+'">'+
+          'BI'+s.bisap+' AP'+s.apache+'</div>'+
+        '<div style="font-size:10px;color:var(--t3)">SO'+s.sofa+' CT'+s.mctsi+'</div>'+
+      '</td>';
+    }
+
+    return '<tr style="border-bottom:1px solid var(--bd);cursor:pointer;transition:.1s" '+
+        'onclick="openPatient(\''+p.id+'\')" onmouseover="this.style.background=\'var(--bg3)\'" onmouseout="this.style.background=\'\'">'+
+      '<td style="padding:9px 10px;border:1px solid var(--bd)">'+
+        '<div style="font-weight:800;font-size:15px;color:var(--c)">'+abbr+'</div>'+
+        '<div style="font-size:11px;color:var(--t2)">'+makeShortName(p2.initials)+'</div>'+
+      '</td>'+
+      '<td style="padding:9px 8px;font-size:12px;border:1px solid var(--bd)">'+
+        (p2.age?p2.age+'л ':'—')+(p2.sex==='m'?' ♂':p2.sex==='f'?' ♀':'')+
+      '</td>'+
+      '<td style="padding:9px 8px;font-size:12px;color:var(--t2);border:1px solid var(--bd)">'+
+        (etioMap[p.etio]||'—')+
+      '</td>'+
+      tpCell('24h')+tpCell('48h')+tpCell('72h')+
+      '<td style="padding:9px 8px;text-align:center;border:1px solid var(--bd)">'+
+        '<span style="font-weight:700;font-size:12px;color:'+sevC+'">'+lastSevL+'</span>'+
+      '</td>'+
+      '<td style="padding:9px 8px;font-size:11px;color:var(--t3);white-space:nowrap;border:1px solid var(--bd)">'+saved+'</td>'+
+      '<td style="padding:6px;text-align:center;white-space:nowrap;border:1px solid var(--bd)">'+
+        '<button onclick="event.stopPropagation();exportFile(\''+p.id+'\')" title="Скачать JSON" '+
+          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--t2);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">📤</button>'+
+        '<button onclick="event.stopPropagation();exportLink(\''+p.id+'\')" title="Ссылка" '+
+          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--t2);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">🔗</button>'+
+        '<button onclick="event.stopPropagation();if(confirm(\'Удалить?\')){ DB.del(\''+p.id+'\');renderHome(); }" title="Удалить" '+
+          'style="background:none;border:1px solid #ef434355;border-radius:5px;color:var(--r);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">✕</button>'+
+      '</td>'+
+    '</tr>';
+  }).join('');
+
+  // ── Сравнительная таблица (≥2 пациентов)
+  var compTable='';
+  if(list.length>=2){
+    var compRows=list.slice(0,15).map(function(p){
+      var p2=p.pat||{};
+      var abbr=patAbbr(p2.initials);
+      var sc=patScores(p);
+      function cCell(tp){
+        if(!sc[tp]) return '<td style="text-align:center;color:var(--t3);font-size:11px;border:1px solid var(--bd);padding:5px">—</td>';
+        var c=sc[tp].sev==='r'?'var(--r)':sc[tp].sev==='y'?'var(--y)':'var(--g)';
+        var s=sc[tp].sc, r2=sc[tp].ran;
+        return '<td style="padding:5px 8px;border:1px solid var(--bd);text-align:center">'+
+          '<div style="font-size:11px;font-weight:700;color:'+c+'">BI'+s.bisap+'/AP'+s.apache+'</div>'+
+          '<div style="font-size:10px;color:var(--t3)">SO'+s.sofa+'/R'+r2.score+'</div>'+
+        '</td>';
+      }
+      return '<tr style="border-bottom:1px solid var(--bd);cursor:pointer" onclick="openPatient(\''+p.id+'\')">'+
+        '<td style="padding:7px 10px;font-weight:700;color:var(--c);border:1px solid var(--bd)">'+abbr+
+          (p2.age?' <span style="font-weight:400;font-size:11px;color:var(--t3)">'+p2.age+'л</span>':'')+
+        '</td>'+
+        cCell('24h')+cCell('48h')+cCell('72h')+
+      '</tr>';
+    }).join('');
+
+    compTable='<div class="card" style="margin-bottom:14px">'+
+      '<div class="ch"><span>📈</span><span class="ct">Сравнительная динамика шкал &nbsp;·&nbsp; <span style="font-size:10px;color:var(--t3)">BI=BISAP · AP=APACHE II · SO=SOFA · R=Ranson</span></span></div>'+
+      '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'+
+        '<thead><tr style="background:var(--bg3)">'+
+          '<th style="padding:7px 10px;text-align:left;font-size:10px;color:var(--t2);text-transform:uppercase;border:1px solid var(--bd)">Пациент</th>'+
+          '<th style="padding:7px;text-align:center;font-size:10px;color:var(--c);text-transform:uppercase;border:1px solid var(--bd)">24 ч</th>'+
+          '<th style="padding:7px;text-align:center;font-size:10px;color:var(--c);text-transform:uppercase;border:1px solid var(--bd)">48 ч</th>'+
+          '<th style="padding:7px;text-align:center;font-size:10px;color:var(--c);text-transform:uppercase;border:1px solid var(--bd)">72 ч</th>'+
+        '</tr></thead>'+
+        '<tbody>'+compRows+'</tbody>'+
+      '</table></div>'+
+    '</div>';
+  }
+
+  // ── Сборка страницы
+  return '<div class="fi-anim" style="padding-bottom:30px">'+
+
+  '<div style="padding:18px 0 14px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">'+
+    '<div>'+
+      '<div style="font-size:24px;font-weight:800;color:var(--t)">👥 Пациенты</div>'+
+      '<div style="font-size:12px;color:var(--t2);margin-top:4px">'+
+        'Всего: <b>'+total+'</b> &nbsp;·&nbsp; '+
+        '<span style="color:var(--r)">Тяжёлых: '+heavy+'</span> &nbsp;·&nbsp; '+
+        '<span style="color:var(--y)">Средних: '+mid+'</span> &nbsp;·&nbsp; '+
+        '<span style="color:var(--g)">Лёгких: '+light+'</span>'+
+      '</div>'+
+    '</div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+      '<button onclick="startNew()" '+
+        'style="padding:10px 18px;background:var(--c);color:#000;border:none;border-radius:9px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">'+
+        '+ Новый пациент</button>'+
+      '<button onclick="importFile()" '+
+        'style="padding:10px 12px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit">'+
+        '📂 Импорт JSON</button>'+
+      '<button onclick="exportAllFile()" '+
+        'style="padding:10px 12px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit">'+
+        '📥 Скачать всё</button>'+
+    '</div>'+
+  '</div>'+
+
+  (total===0 ?
+    '<div style="text-align:center;padding:60px 20px;color:var(--t3)">'+
+      '<div style="font-size:52px;margin-bottom:16px">🏥</div>'+
+      '<div style="font-size:20px;font-weight:700;color:var(--t2);margin-bottom:8px">Пациентов пока нет</div>'+
+      '<div style="font-size:13px;margin-bottom:24px">Нажмите кнопку ниже, чтобы начать</div>'+
+      '<button onclick="startNew()" '+
+        'style="padding:14px 32px;background:var(--c);color:#000;border:none;border-radius:10px;font-size:17px;font-weight:700;cursor:pointer;font-family:inherit">'+
+        '+ Новый пациент</button>'+
+    '</div>'
+  :
+    '<div style="overflow-x:auto;margin-bottom:18px">'+
+      '<table style="width:100%;border-collapse:collapse;min-width:560px">'+
+        '<thead><tr style="background:var(--bg2)">'+
+          '<th style="padding:8px 10px;text-align:left;font-size:10px;color:var(--t2);text-transform:uppercase;letter-spacing:.06em;border:1px solid var(--bd)">Пациент</th>'+
+          '<th style="padding:8px;font-size:10px;color:var(--t2);text-transform:uppercase;border:1px solid var(--bd)">Возр/Пол</th>'+
+          '<th style="padding:8px;font-size:10px;color:var(--t2);text-transform:uppercase;border:1px solid var(--bd)">Этиол.</th>'+
+          '<th style="padding:8px;text-align:center;font-size:10px;color:var(--c);text-transform:uppercase;border:1px solid var(--bd)">24 ч</th>'+
+          '<th style="padding:8px;text-align:center;font-size:10px;color:var(--c);text-transform:uppercase;border:1px solid var(--bd)">48 ч</th>'+
+          '<th style="padding:8px;text-align:center;font-size:10px;color:var(--c);text-transform:uppercase;border:1px solid var(--bd)">72 ч</th>'+
+          '<th style="padding:8px;text-align:center;font-size:10px;color:var(--t2);text-transform:uppercase;border:1px solid var(--bd)">Тяжесть</th>'+
+          '<th style="padding:8px;text-align:left;font-size:10px;color:var(--t2);text-transform:uppercase;border:1px solid var(--bd)">Обновлён</th>'+
+          '<th style="padding:8px;border:1px solid var(--bd)"></th>'+
+        '</tr></thead>'+
+        '<tbody>'+rows+'</tbody>'+
+      '</table>'+
+    '</div>'+
+    compTable
+  )+
+
+  '<div style="text-align:center;font-size:11px;color:var(--t3);padding:12px 0">'+
+    '💾 Данные сохраняются автоматически · '+
+    '📤 Используйте «Скачать всё» для резервной копии или передачи коллеге'+
+  '</div>'+
+  '</div>';
+}
+
 var ST = {
-  step:0, tp:'24h',
+  id:null, step:0, tp:'24h',
   diag:{pain:false,enzymes:false,imaging:false,amylase:'',lipase:'',imgType:''},
   etio:'', onset:'', onsetT:'',
   pat:{initials:'',sex:'',age:'',height:'',weight:'',chronicYes:false,chronic:'none',chronicDetails:''},
@@ -183,6 +509,23 @@ var ST = {
   surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''},
   surgCalcDone:false
 };
+
+function startNew(){
+  DB.saveCurrent();
+  ST={id:null,step:0,tp:'24h',
+    diag:{pain:false,enzymes:false,imaging:false,amylase:'',lipase:'',imgType:''},
+    etio:'',onset:'',onsetT:'',
+    pat:{initials:'',sex:'',age:'',height:'',weight:'',chronicYes:false,chronic:'none',chronicDetails:''},
+    data:{'24h':{},'48h':{},'72h':{}},
+    rem:{},
+    dr:{inf:false,timing:'late',loc:'perigastric',nec:'small',stab:'stable'},
+    surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''},
+    surgCalcDone:false
+  };
+  VIEW='patient';
+  renderFull();
+  window.scrollTo(0,0);
+}
 
 var DDEF={
   temp:'',hr:'',rr:'',sbp:'',dbp:'',uo:'',gcs:'15',men:'normal',vaso:'none',
@@ -202,13 +545,13 @@ function pf(v){ if(v===null||v===undefined||v==='')return null; var n=parseFloat
 
 // Сохранить поле данных — НЕ вызывает R() (чтобы не терять фокус)
 function sD(tp,k,v){ D(tp)[k]=String(v).replace(',','.'); }
-// Сохранить и перерисовать (для select)
-function sDR(tp,k,v){ D(tp)[k]=v; R(); }
+// Сохранить и перерисовать (для select) + автосохранение
+function sDR(tp,k,v){ D(tp)[k]=v; DB.saveCurrent(); R(); }
 // Пациент
 function sP(k,v){ ST.pat[k]=v; }
-function sPR(k,v){ ST.pat[k]=v; R(); }
-// После потери фокуса — полная перерисовка
-function onBlur(){ R(); }
+function sPR(k,v){ ST.pat[k]=v; DB.saveCurrent(); R(); }
+// После потери фокуса — полная перерисовка + автосохранение
+function onBlur(){ DB.saveCurrent(); R(); }
 
 // ═══════════════════════════════════════════════
 // КОНВЕРТАЦИИ (единицы СИ)
@@ -453,9 +796,9 @@ function R(){
   var focused=document.activeElement;
   var inInput=focused&&(focused.tagName==='INPUT'||focused.tagName==='SELECT')&&focused.closest('#main');
   if(!inInput){
+    DB.saveCurrent();
     renderContent();
   } else {
-    // Обновляем только hint-spans без перерисовки всего
     updateHints();
   }
 }
@@ -1482,25 +1825,11 @@ function pageSurg(){
     '<button class="btn btn-p" onclick="goto('+(STEPS.length-1)+')">📄 Итоговый отчёт →</button>'+
   '</div>'+
   '<div class="btnrow" style="margin-top:0;padding-top:0">'+
-    '<button class="btn btn-s" style="background:var(--bg3);border-color:var(--bd2)" onclick="newPatient()">🔄 Новый пациент</button>'+
+    '<button class="btn btn-s" onclick="goHome()">👥 Список пациентов</button>'+
   '</div>'+
   '</div>';
 }
 
-function newPatient(){
-  ST={step:0,tp:'24h',
-    diag:{pain:false,enzymes:false,imaging:false,amylase:'',lipase:'',imgType:''},
-    etio:'',onset:'',onsetT:'',
-    pat:{initials:'',sex:'',age:'',height:'',weight:'',chronicYes:false,chronic:'none',chronicDetails:''},
-    data:{'24h':{},'48h':{},'72h':{}},
-    rem:{},
-    dr:{inf:false,timing:'late',loc:'perigastric',nec:'small',stab:'stable'},
-    surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''},
-    surgCalcDone:false
-  };
-  renderContent();
-  window.scrollTo(0,0);
-}
 
 // ── ИТОГОВЫЙ ОТЧЁТ ─────────────────────────────
 function pageReport(){
@@ -1665,7 +1994,9 @@ function pageReport(){
     '<button class="btn btn-p" onclick="window.print()">🖨 Печать / PDF</button>'+
   '</div>'+
   '<div class="btnrow" style="margin-top:0;padding-top:0">'+
-    '<button class="btn btn-s" onclick="newPatient()">🔄 Новый пациент</button>'+
+    '<button class="btn btn-s" onclick="goHome()">👥 Список пациентов</button>'+
+    '<button class="btn btn-s" onclick="startNew()" style="margin-left:8px">+ Новый пациент</button>'+
+    '<button class="btn btn-s" onclick="exportFile(null)" style="margin-left:8px">📤 Экспорт</button>'+
   '</div>'+
   '</div>';
 }
@@ -1732,7 +2063,9 @@ function inpUnit(lbl,type,id,val,unit,oninput,onblur,hint){
 // ═══════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════
-R();
+if(!importLink()){
+  renderFull(); // Показываем список пациентов
+}
 </script>
 </body>
 </html>
