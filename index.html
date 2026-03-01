@@ -143,6 +143,16 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
 }
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:2px}
+@media print{
+  body{background:#fff!important;color:#000!important}
+  .hdr,.snav,.btnrow{display:none!important}
+  .card{border:1px solid #ccc!important;background:#fff!important;break-inside:avoid}
+  .ch{background:#f5f5f5!important}
+  .ct,.scn,.flb,.sl,.srl{color:#444!important}
+  .srv,.scv,.tpv{color:#000!important}
+  .al{border:1px solid #ccc!important;background:#f9f9f9!important;color:#333!important}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
 </style>
 </head>
 <body>
@@ -166,11 +176,12 @@ var ST = {
   step:0, tp:'24h',
   diag:{pain:false,enzymes:false,imaging:false,amylase:'',lipase:'',imgType:''},
   etio:'', onset:'', onsetT:'',
-  pat:{age:'',weight:'',chronicYes:false,chronic:'none'},
+  pat:{initials:'',sex:'',age:'',height:'',weight:'',chronicYes:false,chronic:'none',chronicDetails:''},
   data:{'24h':{},'48h':{},'72h':{}},
   rem:{},
   dr:{inf:false,timing:'late',loc:'perigastric',nec:'small',stab:'stable'},
-  surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''}
+  surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''},
+  surgCalcDone:false
 };
 
 var DDEF={
@@ -410,7 +421,8 @@ var STEPS=[
   {id:'dyn',    lbl:'Динамика',   ico:'📈'},
   {id:'rem',    lbl:'Напоминания',ico:'🔔'},
   {id:'drain',  lbl:'Дренирование',ico:'🩺'},
-  {id:'surg',   lbl:'Объём вмеш.',ico:'🏥'}
+  {id:'surg',   lbl:'Объём вмеш.',ico:'🏥'},
+  {id:'report', lbl:'Отчёт',      ico:'📄'}
 ];
 
 function confirmed(){ return (ST.diag.pain?1:0)+(ST.diag.enzymes?1:0)+(ST.diag.imaging?1:0)>=2; }
@@ -421,10 +433,11 @@ function critCnt(){ return (ST.diag.pain?1:0)+(ST.diag.enzymes?1:0)+(ST.diag.ima
 // ═══════════════════════════════════════════════
 function R(){
   // Обновляем только badge и nav — без потери фокуса если уже в контенте
+  var abbr=getPatAbbr();
   var cnt=critCnt(),ok=confirmed();
   var b=document.getElementById('dbadge');
   b.className='dbadge '+(ok?'ok':'warn');
-  b.textContent=ok?'✅ ОП подтверждён ('+cnt+'/3)':'⚠ Диагноз: '+cnt+'/3';
+  b.textContent=(abbr?abbr+' · ':'')+(ok?'✅ ОП подтверждён ('+cnt+'/3)':'⚠ Диагноз: '+cnt+'/3');
 
   // Nav
   var nav=document.getElementById('snav');
@@ -461,6 +474,7 @@ function renderContent(){
   else if(id==='rem')html=pageRem();
   else if(id==='drain')html=pageDrain();
   else if(id==='surg')html=pageSurg();
+  else if(id==='report')html=pageReport();
   m.innerHTML=html;
 }
 
@@ -558,7 +572,7 @@ function pageDiag(){
       '<div style="margin-top:16px"><div class="sl">Этиология (предполагаемая)</div>'+
         '<div class="egrid">'+
           [['biliary','🪨 ЖКБ / холедохолитиаз','Желчнокаменная болезнь'],
-           ['alcohol','🍷 Алкогольный','Острый/хронический'],
+           ['aliment','🍔 Алиментарный','Погрешность в диете, переедание'],
            ['hypertg','🧪 Гипертриглицеридемия','ТГ >11 ммоль/л'],
            ['ercp','🔭 После ЭРХПГ','24–72 ч после процедуры'],
            ['drug','💊 Медикаментозный','Азатиоприн, диуретики'],
@@ -608,31 +622,67 @@ function sinceOnset(){
 // ── ПАЦИЕНТ ────────────────────────────────────
 function pagePat(){
   var p=ST.pat;
+  var ht=pf(p.height),wt=pf(p.weight);
+  var bmi=(ht&&wt&&ht>0)?(wt/((ht/100)*(ht/100))):null;
+  var bmiNote=bmi?( bmi<18.5?'↓ Дефицит (<18.5)':bmi<25?'✅ Норма (18.5–24.9)':bmi<30?'⚠ Избыток (25–29.9)':bmi<35?'🔴 Ожирение I (30–34.9)':bmi<40?'🔴 Ожирение II (35–39.9)':'🔴 Ожирение III (≥40)'):'';
+
   return '<div class="fi-anim">'+
   '<div class="card">'+
     '<div class="ch"><span>👤</span><span class="ct">Данные пациента</span></div>'+
     '<div class="cb">'+
-      '<div class="fg2">'+
-        inpUnit('Возраст','text','pat_age',p.age||'','лет','sP(\'age\',this.value)','onBlur()','')+
-        inpUnit('Вес','text','pat_wt',p.weight||'','кг','sP(\'weight\',this.value)','onBlur()','')+
+
+      // Инициалы
+      '<div style="margin-bottom:13px">'+
+        '<div class="sl">Инициалы пациента</div>'+
+        '<div class="fl"><div class="flb">Фамилия И.О. (например: Иванов В.А.)</div>'+
+          '<input class="fi" type="text" placeholder="Иванов В.А." value="'+(p.initials||'')+'" '+
+            'oninput="sP(\'initials\',this.value)" onblur="onBlur()" onfocus="this.select()">'+
+        '</div>'+
+        (p.initials?'<div class="fconv">В отчёте: '+makeShortName(p.initials)+'</div>':'')+
       '</div>'+
 
-      // Хронические заболевания — два чётких варианта
-      '<div style="margin-top:14px"><div class="sl">Хронические заболевания</div>'+
+      // Пол
+      '<div style="margin-bottom:13px">'+
+        '<div class="sl">Пол</div>'+
+        '<div class="tg">'+
+          '<button class="tb'+(p.sex==='m'?' on':'')+'" onclick="ST.pat.sex=\'m\';ST.surg.gender=\'10\';R()">♂ Мужской</button>'+
+          '<button class="tb'+(p.sex==='f'?' on':'')+'" onclick="ST.pat.sex=\'f\';ST.surg.gender=\'0\';R()">♀ Женский</button>'+
+        '</div>'+
+        (p.sex?'<div class="fconv">'+(p.sex==='m'?'Мужской (+10 б в калькуляторе вмешательства)':'Женский (0 б в калькуляторе вмешательства)')+'</div>':'')+
+      '</div>'+
+
+      // Возраст, Рост, Вес
+      '<div class="fg">'+
+        inpUnit('Возраст','text','pat_age',p.age||'','лет','sP(\'age\',this.value)','onBlur()','')+
+        inpUnit('Рост','text','pat_ht',p.height||'','см','sP(\'height\',this.value)','onBlur()','')+
+        inpUnit('Вес','text','pat_wt',p.weight||'','кг','sP(\'weight\',this.value)','onBlur()','')+
+      '</div>'+
+      (bmi?
+        '<div class="ib" style="margin-top:9px">'+
+          'ИМТ = '+wt+' ÷ ('+ht+'/100)² = <b style="color:var(--c)">'+bmi.toFixed(1)+' кг/м²</b> — '+bmiNote+
+        '</div>':
+        (ht||wt?'<div class="fconv">Введите рост и вес для расчёта ИМТ</div>':'')+
+      '')+
+
+      // Хронические заболевания
+      '<div style="margin-top:14px"><div class="sl">Сопутствующие хронические заболевания</div>'+
         '<div class="tg">'+
           '<button class="tb'+((!p.chronicYes)?' ong':'')+'" onclick="ST.pat.chronicYes=false;ST.pat.chronic=\'none\';R()">✅ Нет</button>'+
           '<button class="tb'+(p.chronicYes?' onr':'')+'" onclick="ST.pat.chronicYes=true;R()">⚠ Да</button>'+
         '</div>'+
         (p.chronicYes?
           '<div style="margin-top:10px">'+
-            '<div class="flb" style="margin-bottom:6px">Тип для APACHE II</div>'+
+            '<div class="flb" style="margin-bottom:5px">Описание (для отчёта)</div>'+
+            '<input class="fi" type="text" placeholder="ИБС, СД 2 типа, ХБП..." value="'+(p.chronicDetails||'')+'" '+
+              'oninput="sP(\'chronicDetails\',this.value)" onblur="onBlur()" onfocus="this.select()" style="margin-bottom:8px">'+
+            '<div class="flb" style="margin-bottom:5px">Тип для APACHE II</div>'+
             '<select class="fsel" onchange="sDR(\'pat\',\'chronic\',this.value)">'+
               [['elective','Плановая / предплановая операция (+2 б)'],
                ['nonop','Неоперативный / экстренный (+5 б)']
               ].map(function(o){return '<option value="'+o[0]+'"'+(p.chronic===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+
             '</select>'+
-            '<div style="margin-top:8px;font-size:11px;color:var(--t2);line-height:1.6">'+
-              '<b style="color:var(--t)">Учитываются:</b> цирроз · хроническая почечная/сердечная/лёгочная нед. · иммунодефицит (ВИЧ, кортикостероиды, химиотерапия)'+
+            '<div style="margin-top:7px;font-size:11px;color:var(--t2);line-height:1.5">'+
+              '<b style="color:var(--t)">Учитываются:</b> цирроз · ХПН · ХСН · ХОБЛ · иммунодефицит (ВИЧ, кортикостероиды)'+
             '</div>'+
           '</div>'
         :
@@ -644,6 +694,34 @@ function pagePat(){
   nav2('← Назад','Далее → Витальные')+
   '</div>';
 }
+
+// Формирование краткого имени из ФИО
+function makeShortName(str){
+  if(!str)return '';
+  str=str.trim();
+  // Если уже в формате "Ив.В.А." — вернуть как есть
+  if(/^[А-ЯЁ][а-яё]+\s[А-ЯЁ]\.[А-ЯЁ]\.$/.test(str))return str;
+  var parts=str.split(/\s+/);
+  if(parts.length===1)return parts[0].substring(0,3).toUpperCase();
+  var fam=parts[0];
+  var inits=parts.slice(1).map(function(p){return p[0]?p[0].toUpperCase()+'.':''}).join('');
+  return fam+' '+inits;
+}
+
+// Получить аббревиатуру ФИО для заголовка (3 буквы)
+function getPatAbbr(){
+  var p=ST.pat;
+  if(!p.initials)return '';
+  var str=p.initials.trim();
+  var parts=str.split(/\s+/);
+  if(parts.length>=3){
+    return (parts[0][0]||'')+(parts[1][0]||'')+(parts[2][0]||'');
+  } else if(parts.length===2){
+    return (parts[0].substring(0,2)+(parts[1][0]||'')).toUpperCase();
+  }
+  return str.substring(0,3).toUpperCase();
+}
+
 
 // ── ВИТАЛЬНЫЕ ──────────────────────────────────
 function pageVitals(){
@@ -1284,27 +1362,36 @@ function pageDrain(){
 }
 
 // ── КАЛЬКУЛЯТОР ОБЪЁМА ВМЕШАТЕЛЬСТВА ──────────
+function surgCalc(){
+  ST.surgCalcDone=true;
+  renderContent();
+}
+
 function pageSurg(){
   var sg=ST.surg;
-  // Считаем сумму
+  // Если пол уже указан в данных пациента — авто-заполнить
+  if(!sg.gender&&ST.pat.sex){sg.gender=ST.pat.sex==='m'?'10':'0';}
+
   var vals=[sg.gender,sg.necrosis,sg.character,sg.wall,sg.crp,sg.failure,sg.volume];
-  var allFilled=vals.every(function(v){return v!=='';});
+  var filledCount=vals.filter(function(v){return v!=='';}).length;
+  var allFilled=filledCount===7;
   var total=vals.reduce(function(a,v){return a+(parseInt(v)||0);},0);
 
   var res=null;
   if(allFilled){
-    if(total<15) res={c:'g',lbl:'Не более 2 дренажей',ico:'🔵',sub:'Минимальная инвазия'};
-    else if(total<30) res={c:'y',lbl:'Эндоскопия и/или 3–4 дренажа',ico:'🎯',sub:'Эндоскопическое вмешательство'};
-    else if(total<50) res={c:'y',lbl:'4–5 дренажей / SEMS / эндоскопия',ico:'🔬',sub:'Расширенная инвазия'};
-    else res={c:'r',lbl:'VARD / открытый доступ',ico:'🏥',sub:'Максимальная инвазия'};
+    if(total<15)       res={c:'g',lbl:'Не более 2 дренажей',                    ico:'🔵',sub:'Чрескожное дренирование, 1–2 катетера'};
+    else if(total<=35) res={c:'y',lbl:'Эндоскопия и/или 3–4 дренажа',           ico:'🎯',sub:'EUS-дренирование или 3–4 чрескожных дренажа'};
+    else if(total<=50) res={c:'y',lbl:'4–5 дренажей / эндоскопия / SEMS',       ico:'🔬',sub:'Расширенное дренирование, рассмотреть металлические стенты'};
+    else               res={c:'r',lbl:'VARD / открытый доступ',                 ico:'🏥',sub:'Видеоассистированная или открытая некрэктомия'};
   }
   var resC=res?(res.c==='g'?'var(--g)':res.c==='y'?'var(--y)':'var(--r)'):'var(--bd)';
 
+  // Select-helper: вызывает renderContent() напрямую (минуя проверку фокуса)
   function surgSel(lbl,sub,key,opts){
     return '<div class="surg-item">'+
       '<div class="surg-lbl">'+lbl+'</div>'+
       (sub?'<div class="surg-sub">'+sub+'</div>':'')+
-      '<select class="surg-sel" onchange="ST.surg[\''+key+'\']=this.value;R()">'+
+      '<select class="surg-sel" onchange="ST.surg[\''+key+'\']=this.value;ST.surgCalcDone=false;renderContent()">'+
         '<option value="">— Выберите —</option>'+
         opts.map(function(o){return '<option value="'+o[0]+'"'+(sg[key]===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+
       '</select>'+
@@ -1315,9 +1402,9 @@ function pageSurg(){
   '<div class="card">'+
     '<div class="ch"><span>🏥</span><span class="ct">Калькулятор объёма хирургического вмешательства при панкреонекрозе</span></div>'+
     '<div class="cb">'+
-      '<div class="al al-i">Шкала бальной оценки для определения оптимального метода дренирования</div>'+
+      '<div class="al al-i">Шкала балльной оценки · заполните все 7 параметров и нажмите «Рассчитать»</div>'+
 
-      surgSel('Пол пациента','',
+      surgSel('Пол пациента','Автозаполняется из данных пациента',
         'gender',[['0','Женский (0 б)'],['10','Мужской (10 б)']])+
 
       surgSel('Объём некроза поджелудочной железы','',
@@ -1352,38 +1439,51 @@ function pageSurg(){
         ])+
 
       // Прогресс-бар
-      '<div style="margin:14px 0 8px;display:flex;justify-content:space-between;font-size:11px;color:var(--t3)">'+
-        '<span>Заполнено: '+vals.filter(function(v){return v!=='';}).length+' / 7</span>'+
-        (allFilled?'<span style="color:var(--c)">Счёт: '+total+' баллов</span>':'')+
+      '<div style="margin:14px 0 8px;display:flex;justify-content:space-between;align-items:center">'+
+        '<span style="font-size:11px;color:var(--t3)">Заполнено: '+filledCount+' / 7</span>'+
+        (allFilled?'<span style="font-size:12px;font-weight:700;color:var(--c)">'+total+' баллов</span>':'')+
       '</div>'+
       '<div style="height:5px;background:var(--bd);border-radius:3px;overflow:hidden;margin-bottom:14px">'+
-        '<div style="height:100%;width:'+(vals.filter(function(v){return v!=='';}).length/7*100)+'%;background:var(--c);transition:.3s"></div>'+
+        '<div style="height:100%;width:'+(filledCount/7*100)+'%;background:var(--c);transition:.3s"></div>'+
       '</div>'+
 
+      // Кнопка Рассчитать — всегда видна когда все заполнено
+      (allFilled&&!ST.surgCalcDone?
+        '<button onclick="surgCalc()" style="width:100%;padding:14px;background:var(--c);color:#000;border:none;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:14px">📊 Рассчитать объём вмешательства</button>'
+      :'')+
+
       // Результат
-      (allFilled?
+      (allFilled&&(ST.surgCalcDone||res)?
         '<div class="score-big" style="border-color:'+resC+'55;background:'+resC+'12">'+
           '<div class="score-num" style="color:'+resC+'">'+total+'</div>'+
           '<div style="font-size:11px;color:var(--t2);margin-top:2px">баллов</div>'+
           '<div class="score-lbl" style="color:'+resC+'">'+res.ico+' '+res.lbl+'</div>'+
           '<div class="score-rec">'+res.sub+'</div>'+
           '<div style="margin-top:12px;font-size:11px;color:var(--t2);line-height:1.7">'+
-            (total<15?'Малоинвазивное чрескожное дренирование. 1–2 дренажа достаточно для эффективной санации.':
-             total<30?'Рекомендовано эндоскопическое вмешательство (EUS) и/или установка 3–4 дренажей с адекватным контролем.':
-             total<50?'4–5 дренажей, рассмотреть металлические стенты (SEMS) или лапароскопическую некрэктомию.':
-             'Открытый хирургический доступ или VARD. Высокий риск послеоперационных осложнений. ОРИТ обязателен.')+
+            (total<15?
+              'Показано минимально инвазивное вмешательство. Чрескожное дренирование под КТ/УЗ-наведением, 1–2 катетера достаточно для эффективной санации.':
+             total<=35?
+              'Рекомендовано EUS-дренирование (трансгастральный доступ, LAMS-стенты) и/или установка 3–4 чрескожных дренажей с динамическим контролем.':
+             total<=50?
+              '4–5 дренажей. Рассмотреть металлические саморасправляющиеся стенты (SEMS) или эндоскопическую некрэктомию (DEET). Step-up подход.':
+              'VARD (видеоассистированная ретроперитонеальная дебридация) или открытая некрэктомия. Высокий операционный риск. ОРИТ обязателен.')+
           '</div>'+
           '<div style="margin-top:10px;padding-top:10px;border-top:1px solid '+resC+'33;font-size:10px;color:var(--t3);text-align:left">'+
-            '<b>Пороги:</b> &lt;15 б — ≤2 дренажа · 15–29 — эндоскопия/3–4 дренажа · 30–49 — SEMS/4–5 дренажей · ≥50 — VARD/открытый'+
+            '<b>Пороги:</b> &lt;15 б — ≤2 дренажа &nbsp;·&nbsp; 15–35 — эндоскопия / 3–4 дренажа &nbsp;·&nbsp; 35–50 — 4–5 дренажей / SEMS &nbsp;·&nbsp; >50 — VARD / открытый'+
           '</div>'+
         '</div>'
       :
-        '<div style="text-align:center;padding:20px;color:var(--t3);font-size:13px">Заполните все 7 параметров для расчёта</div>'
+        (!allFilled?'<div style="text-align:center;padding:18px;color:var(--t3);font-size:13px">Заполните все 7 параметров для расчёта</div>':'')
       )+
     '</div>'+
   '</div>'+
-  nav2('← Дренирование',
-    '<button class="btn btn-p" onclick="newPatient()" style="margin-left:0">🔄 Новый пациент</button>')+
+  '<div class="btnrow">'+
+    '<button class="btn btn-s" onclick="back()">← Дренирование</button>'+
+    '<button class="btn btn-p" onclick="goto('+(STEPS.length-1)+')">📄 Итоговый отчёт →</button>'+
+  '</div>'+
+  '<div class="btnrow" style="margin-top:0;padding-top:0">'+
+    '<button class="btn btn-s" style="background:var(--bg3);border-color:var(--bd2)" onclick="newPatient()">🔄 Новый пациент</button>'+
+  '</div>'+
   '</div>';
 }
 
@@ -1391,15 +1491,185 @@ function newPatient(){
   ST={step:0,tp:'24h',
     diag:{pain:false,enzymes:false,imaging:false,amylase:'',lipase:'',imgType:''},
     etio:'',onset:'',onsetT:'',
-    pat:{age:'',weight:'',chronicYes:false,chronic:'none'},
+    pat:{initials:'',sex:'',age:'',height:'',weight:'',chronicYes:false,chronic:'none',chronicDetails:''},
     data:{'24h':{},'48h':{},'72h':{}},
     rem:{},
     dr:{inf:false,timing:'late',loc:'perigastric',nec:'small',stab:'stable'},
-    surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''}
+    surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''},
+    surgCalcDone:false
   };
   renderContent();
   window.scrollTo(0,0);
 }
+
+// ── ИТОГОВЫЙ ОТЧЁТ ─────────────────────────────
+function pageReport(){
+  var p=ST.pat;
+  var sc=calc(ST.tp),d=D(ST.tp),tp=ST.tp;
+  var ran=calcRanson(),dzh=calcDzhanelidge(ST.tp);
+  var ht=pf(p.height),wt=pf(p.weight);
+  var bmi=(ht&&wt)?(wt/((ht/100)*(ht/100))):null;
+  var bmiNote=bmi?( bmi<18.5?'Дефицит массы тела':bmi<25?'Норма':bmi<30?'Избыточная масса':bmi<35?'Ожирение I ст.':bmi<40?'Ожирение II ст.':'Ожирение III ст.'):'';
+  var shortName=makeShortName(p.initials);
+  var abbr=getPatAbbr();
+  var sexLabel=p.sex==='m'?'Мужской':p.sex==='f'?'Женский':'Не указан';
+
+  // Этиология — текстовый ярлык
+  var etioMap={biliary:'Билиарный (ЖКБ/холедохолитиаз)',aliment:'Алиментарный',hypertg:'Гипертриглицеридемия',
+    ercp:'Постпроцедурный (ЭРХПГ)',drug:'Медикаментозный',trauma:'Травматический',
+    autoimmune:'Аутоиммунный (IgG4)',idio:'Идиопатический'};
+  var etioLbl=etioMap[ST.etio]||'Не указана';
+
+  // Тяжесть — итоговый класс
+  var sirsType=d.sirs_type||'none';
+  var sev=sc.apache>=8||sc.bisap>=3||sc.sofa>=6||ran.score>=3||dzh.score>=5?'r':
+          sc.apache>=5||sc.bisap>=2||sc.sofa>=3||ran.score>=2||dzh.score>=2?'y':'g';
+  var sevC=sev==='r'?'var(--r)':sev==='y'?'var(--y)':'var(--g)';
+  var sevL=sev==='r'?'ТЯЖЁЛЫЙ ОП':sev==='y'?'СРЕДНЕЙ ТЯЖЕСТИ':'ЛЁГКИЙ ОП';
+  var sevIcon=sev==='r'?'🚨':sev==='y'?'⚠️':'✅';
+
+  // Хирургический калькулятор
+  var sg=ST.surg;
+  var surgVals=[sg.gender,sg.necrosis,sg.character,sg.wall,sg.crp,sg.failure,sg.volume];
+  var surgAllFilled=surgVals.every(function(v){return v!=='';});
+  var surgTotal=surgVals.reduce(function(a,v){return a+(parseInt(v)||0);},0);
+  var surgResLbl=surgAllFilled?(surgTotal<15?'Не более 2 дренажей':surgTotal<=35?'Эндоскопия / 3–4 дренажа':surgTotal<=50?'4–5 дренажей / SEMS':'VARD / открытый доступ'):'Не заполнено';
+  var surgResC=surgAllFilled?(surgTotal<15?'var(--g)':surgTotal<=35?'var(--y)':surgTotal<=50?'var(--y)':'var(--r)'):'var(--t3)';
+
+  // Строки шкал
+  function row(lbl,val,col,extra){
+    return '<tr>'+
+      '<td style="padding:7px 10px;font-size:13px;color:var(--t2);border-bottom:1px solid #1a2d4422">'+lbl+'</td>'+
+      '<td style="padding:7px 10px;font-family:\'Courier New\';font-weight:700;font-size:15px;color:'+(col||'var(--t)')+';border-bottom:1px solid #1a2d4422">'+val+'</td>'+
+      '<td style="padding:7px 10px;font-size:11px;color:var(--t3);border-bottom:1px solid #1a2d4422">'+(extra||'')+'</td>'+
+    '</tr>';
+  }
+
+  var apC=sc.apache>=20?'var(--r)':sc.apache>=8?'var(--y)':'var(--g)';
+  var biC=sc.bisap>=3?'var(--r)':sc.bisap>=2?'var(--y)':'var(--g)';
+  var soC=sc.sofa>=7?'var(--r)':sc.sofa>=4?'var(--y)':'var(--g)';
+  var mcC=sc.mctsi>=7?'var(--r)':sc.mctsi>=4?'var(--y)':'var(--g)';
+  var ranC=ran.score>=5?'var(--r)':ran.score>=3?'var(--y)':'var(--g)';
+  var dzhC=dzh.score>=5?'var(--r)':dzh.score>=2?'var(--y)':'var(--g)';
+
+  return '<div class="fi-anim">'+
+
+  // Шапка отчёта
+  '<div class="card" style="border-color:'+sevC+'55">'+
+    '<div style="background:'+sevC+'18;padding:16px 18px;border-bottom:1px solid '+sevC+'33">'+
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">'+
+        '<div>'+
+          '<div style="font-size:11px;color:var(--t3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Pancrea-Score · Итоговый отчёт</div>'+
+          '<div style="font-size:22px;font-weight:800;color:var(--t)">'+(abbr||'—')+
+            (p.initials?'<span style="font-size:14px;font-weight:400;color:var(--t2);margin-left:10px">'+shortName+'</span>':'')+
+          '</div>'+
+          '<div style="font-size:13px;color:var(--t2);margin-top:4px">'+
+            (p.age?p.age+' лет':'')+
+            (p.sex?' · '+sexLabel:'')+
+            (bmi?' · ИМТ '+bmi.toFixed(1)+' кг/м² ('+bmiNote+')':'')+
+          '</div>'+
+        '</div>'+
+        '<div style="text-align:right">'+
+          '<div style="font-size:28px;font-weight:700;color:'+sevC+'">'+sevIcon+' '+sevL+'</div>'+
+          '<div style="font-size:11px;color:var(--t3);margin-top:2px">'+new Date().toLocaleDateString('ru-RU')+'</div>'+
+        '</div>'+
+      '</div>'+
+    '</div>'+
+
+    '<div style="padding:14px 18px;display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px">'+
+      '<div><span style="color:var(--t2)">Этиология: </span><b>'+etioLbl+'</b></div>'+
+      (ST.onset?'<div><span style="color:var(--t2)">Длительность: </span><b>'+sinceOnset()+'</b></div>':'')+
+      (p.height&&p.weight?'<div><span style="color:var(--t2)">Рост / Вес: </span><b>'+p.height+' см / '+p.weight+' кг</b></div>':'')+
+      (p.chronicYes?'<div style="grid-column:1/-1"><span style="color:var(--y)">⚠ Сопутствующая патология: </span><b>'+(p.chronicDetails||'Имеется (уточнить)')+'</b></div>':'')+
+    '</div>'+
+  '</div>'+
+
+  // Таблица шкал
+  '<div class="card">'+
+    '<div class="ch"><span>📊</span><span class="ct">Шкалы тяжести — '+tp+'</span></div>'+
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'+
+      '<thead><tr>'+
+        '<th style="padding:7px 10px;background:var(--bg3);font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--t2);text-align:left;border-bottom:1px solid var(--bd)">Шкала</th>'+
+        '<th style="padding:7px 10px;background:var(--bg3);font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--t2);text-align:left;border-bottom:1px solid var(--bd)">Балл</th>'+
+        '<th style="padding:7px 10px;background:var(--bg3);font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--t2);text-align:left;border-bottom:1px solid var(--bd)">Интерпретация</th>'+
+      '</tr></thead>'+
+      '<tbody>'+
+        row('BISAP (0–5)',sc.bisap+' / 5',biC,
+          (sc.bisap>=3?'Тяжёлый':sc.bisap>=2?'Средней тяжести':'Лёгкий')+' · лет. '+sc.biMort)+
+        row('APACHE II',sc.apache,apC,
+          (sc.apache>=20?'Крайне тяжёлый':sc.apache>=12?'Тяжёлый':sc.apache>=8?'Средней тяжести':'Лёгкий')+' · лет. ≈'+sc.apMort)+
+        row('SOFA (0–24)',sc.sofa+' / 24',soC,
+          (sc.sofa>=7?'Полиорганная нед.':sc.sofa>=4?'Тяжёлая дисф.':sc.sofa>=2?'Умеренная дисф.':'Минимальная')+
+          (sc.sofa>=2?' · лет. >10%':''))+
+        row('mCTSI (0–10)',sc.mctsi+' / 10',mcC,
+          (sc.mctsi>=7?'Тяжёлый ~17%':sc.mctsi>=4?'Средний ~6%':sc.mctsi>=2?'Лёгкий ~3%':'Лёгкий <1%'))+
+        row('Ranson (0–11)',ran.score+' / 11',ranC,
+          ran.sevLbl+' · лет. '+ran.mort)+
+        row('Джанелидзе (0–13)',dzh.score+' / 13',dzhC,dzh.sevLbl)+
+        (sirsType!=='none'?row('SIRS',sc.sirs+'/4 · '+(sirsType==='persistent'?'Персистирующий':'Транзиторный'),
+          sirsType==='persistent'?'var(--r)':'var(--y)',
+          'Лет. '+(sirsType==='persistent'?'25.4%':'8%')+' · doi: 10.1002/bjs.5290'):'')+
+        (sc.napp?row('NAPP',parseFloat(sc.napp).toFixed(1)+' г/л',parseFloat(sc.napp)>30?'var(--r)':'var(--g)',parseFloat(sc.napp)>30?'⚠ >30 г/л — тяжёлый риск':'В норме'):'')+
+        (d.crp?row('CРБ ('+tp+')',d.crp+' мг/л',sc.crpC,(tp!=='24h'?(d.crp>=150?'≥150 мг/л — тяжёлый':'<150 мг/л'):'Пик ожидается к 48ч')):'')+
+      '</tbody>'+
+    '</table></div>'+
+  '</div>'+
+
+  // Итоговый вердикт
+  '<div class="card" style="border-color:'+sevC+'55">'+
+    '<div style="padding:14px 18px;background:'+sevC+'12">'+
+      '<div style="font-size:15px;font-weight:700;color:'+sevC+';margin-bottom:8px">'+sevIcon+' Заключение: '+sevL+'</div>'+
+      '<div style="display:flex;gap:14px;flex-wrap:wrap">'+
+        [['BISAP',sc.bisap,'/5'],['APACHE II',sc.apache,''],['SOFA',sc.sofa,'/24'],
+         ['mCTSI',sc.mctsi,'/10'],['Ranson',ran.score,'/11'],['Джанел.',dzh.score,'/13']].map(function(x){
+          return '<div style="text-align:center;min-width:50px">'+
+            '<div style="font-size:9px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">'+x[0]+'</div>'+
+            '<div style="font-size:20px;font-weight:700;font-family:\'Courier New\';color:'+sevC+'">'+x[1]+
+              '<span style="font-size:10px;color:var(--t3)">'+x[2]+'</span></div>'+
+          '</div>';
+        }).join('')+
+      '</div>'+
+    '</div>'+
+  '</div>'+
+
+  // Объём вмешательства (если заполнено)
+  (surgAllFilled?
+    '<div class="card" style="border-color:'+surgResC+'44">'+
+      '<div class="ch"><span>🏥</span><span class="ct">Объём хирургического вмешательства</span></div>'+
+      '<div style="padding:14px 18px">'+
+        '<div style="font-size:28px;font-weight:700;font-family:\'Courier New\';color:'+surgResC+'">'+surgTotal+'</div>'+
+        '<div style="font-size:11px;color:var(--t2);margin-bottom:8px">баллов из 60</div>'+
+        '<div style="font-size:16px;font-weight:700;color:'+surgResC+'">'+surgResLbl+'</div>'+
+        '<div style="margin-top:8px;font-size:10px;color:var(--t3)">'+
+          '&lt;15 — ≤2 дренажа &nbsp;·&nbsp; 15–35 — эндоскопия/3–4 &nbsp;·&nbsp; 35–50 — SEMS/4–5 &nbsp;·&nbsp; >50 — VARD/открытый'+
+        '</div>'+
+      '</div>'+
+    '</div>':'<div class="al al-i">ℹ Для расчёта объёма вмешательства заполните шаг «Объём вмеш.»</div>')+
+
+  // Рекомендации по дренированию (если инфицированный некроз)
+  (ST.dr.inf?
+    '<div class="card">'+
+      '<div class="ch"><span>🩺</span><span class="ct">Дренирование — Step-up подход</span></div>'+
+      '<div style="padding:12px 18px;font-size:13px;line-height:1.8">'+
+        '<div>Инфицирование: <b style="color:var(--r)">Подтверждено</b></div>'+
+        '<div>Срок: <b>'+(ST.dr.timing==='early'?'Ранний <4 нед (НАНП)':'Поздний ≥4 нед (WON)')+'</b></div>'+
+        '<div>Локализация: <b>'+(ST.dr.loc==='perigastric'?'Перигастральная':'Ретроперитонеальная')+'</b></div>'+
+        '<div>Объём некроза: <b>'+(ST.dr.nec==='large'?'≥50% ⚠':'<50%')+'</b></div>'+
+        '<div>Гемодинамика: <b style="color:'+(ST.dr.stab==='unstable'?'var(--r)':'var(--g)')+'">'+(ST.dr.stab==='unstable'?'Нестабильна 🚨':'Стабильна')+'</b></div>'+
+      '</div>'+
+    '</div>':'')+
+
+  // Кнопки
+  '<div class="btnrow">'+
+    '<button class="btn btn-s" onclick="back()">← Назад</button>'+
+    '<button class="btn btn-p" onclick="window.print()">🖨 Печать / PDF</button>'+
+  '</div>'+
+  '<div class="btnrow" style="margin-top:0;padding-top:0">'+
+    '<button class="btn btn-s" onclick="newPatient()">🔄 Новый пациент</button>'+
+  '</div>'+
+  '</div>';
+}
+
 
 // ═══════════════════════════════════════════════
 // HELPERS ДЛЯ ГЕНЕРАЦИИ ПОЛЕЙ
