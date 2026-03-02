@@ -211,8 +211,17 @@ function exportLink(id){
   if(!p) return;
   try{
     var b64 = btoa(unescape(encodeURIComponent(JSON.stringify(p))));
-    var url = location.href.split('#')[0]+'#ps='+b64;
-    prompt('Ссылка для передачи коллеге (скопируйте):', url);
+    // encodeURIComponent чтобы +/=/  не обрезались браузером/мессенджером
+    var url = location.href.split('#')[0]+'#ps='+encodeURIComponent(b64);
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(url).then(function(){
+        alert('✅ Ссылка скопирована в буфер обмена!\n\nОтправьте её коллеге в мессенджере или по email.\nПри открытии данные пациента загрузятся автоматически.');
+      },function(){
+        prompt('Скопируйте ссылку (Ctrl+A → Ctrl+C):', url);
+      });
+    } else {
+      prompt('Скопируйте ссылку (Ctrl+A → Ctrl+C):', url);
+    }
   }catch(e){ alert('Ошибка создания ссылки'); }
 }
 function exportFile(id){
@@ -249,9 +258,9 @@ function importFile(){
           list.unshift(rec); added++;
         });
         DB.saveAll(list);
-        alert('Импортировано: '+added+' пациент(ов)');
+        alert('✅ Загружено: '+added+' пациент(ов)');
         renderHome();
-      }catch(err){ alert('Ошибка файла: '+err.message); }
+      }catch(err){ alert('⚠ Ошибка файла.\n\nУбедитесь, что это файл .json, ранее сохранённый из Pancrea-Score.\n\nДетали: '+err.message); }
     };
     r.readAsText(f);
   };
@@ -261,7 +270,9 @@ function importLink(){
   var hash = location.hash;
   if(!hash||hash.indexOf('#ps=')<0) return false;
   try{
-    var rec = JSON.parse(decodeURIComponent(escape(atob(hash.replace('#ps=','')))));
+    // decodeURIComponent для обратной обработки encodeURIComponent в exportLink
+    var b64 = decodeURIComponent(hash.replace('#ps=',''));
+    var rec = JSON.parse(decodeURIComponent(escape(atob(b64))));
     if(!rec||!rec.diag) return false;
     rec.id = 'p'+Date.now(); rec.savedAt=rec.updatedAt=Date.now();
     var list=DB.load(); list.unshift(rec); DB.saveAll(list);
@@ -388,10 +399,10 @@ function buildHome(){
       '</td>'+
       '<td style="padding:9px 8px;font-size:11px;color:var(--t3);white-space:nowrap;border:1px solid var(--bd)">'+saved+'</td>'+
       '<td style="padding:6px;text-align:center;white-space:nowrap;border:1px solid var(--bd)">'+
-        '<button onclick="event.stopPropagation();exportFile(\''+p.id+'\')" title="Скачать JSON" '+
-          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--t2);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">📤</button>'+
-        '<button onclick="event.stopPropagation();exportLink(\''+p.id+'\')" title="Ссылка" '+
-          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--t2);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">🔗</button>'+
+        '<button onclick="event.stopPropagation();exportLink(\''+p.id+'\')" title="Скопировать ссылку для коллеги" '+
+          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--c);padding:3px 8px;cursor:pointer;font-size:11px;margin:1px;font-weight:600">🔗 Поделиться</button>'+
+        '<button onclick="event.stopPropagation();exportFile(\''+p.id+'\')" title="Скачать файл резервной копии" '+
+          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--t2);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">💾</button>'+
         '<button onclick="event.stopPropagation();if(confirm(\'Удалить?\')){ DB.del(\''+p.id+'\');renderHome(); }" title="Удалить" '+
           'style="background:none;border:1px solid #ef434355;border-radius:5px;color:var(--r);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">✕</button>'+
       '</td>'+
@@ -455,10 +466,10 @@ function buildHome(){
         '+ Новый пациент</button>'+
       '<button onclick="importFile()" '+
         'style="padding:10px 12px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit">'+
-        '📂 Импорт JSON</button>'+
+        '📂 Открыть файл пациента</button>'+
       '<button onclick="exportAllFile()" '+
         'style="padding:10px 12px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit">'+
-        '📥 Скачать всё</button>'+
+        '💾 Резервная копия (JSON)</button>'+
     '</div>'+
   '</div>'+
 
@@ -492,8 +503,9 @@ function buildHome(){
   )+
 
   '<div style="text-align:center;font-size:11px;color:var(--t3);padding:12px 0">'+
-    '💾 Данные сохраняются автоматически · '+
-    '📤 Используйте «Скачать всё» для резервной копии или передачи коллеге'+
+    '💾 Данные сохраняются автоматически в этом браузере · '+
+    '🔗 Кнопка «Поделиться» копирует ссылку для коллеги · '+
+    '💾 «Резервная копия» — сохранить/перенести все данные'+
   '</div>'+
   '</div>';
 }
@@ -1635,6 +1647,22 @@ function pageRem(){
 // ── ДРЕНИРОВАНИЕ ───────────────────────────────
 function pageDrain(){
   var ds=ST.dr;
+
+  // ── Авто-синхронизация объёма некроза из данных МСКТ (КЩС/КТ шаг) ──
+  var ctNec=null;
+  ['72h','48h','24h'].forEach(function(tp){
+    if(!ctNec&&ST.data[tp]&&ST.data[tp].nec&&ST.data[tp].nec!=='none'){
+      ctNec=ST.data[tp].nec;
+    }
+  });
+  if(ctNec){
+    // gt50 → large (≥50%), остальное → small (<50%)
+    ST.dr.nec = ctNec==='gt50' ? 'large' : 'small';
+    // Синхронизация с калькулятором объёма вмешательства
+    if(!ST.surg.necrosis){
+      ST.surg.necrosis = ctNec==='gt50'?'8':ctNec==='30to50'?'5':'0';
+    }
+  }
   var steps=[];
   if(ds.inf){
     steps.push({ico:'💊',lbl:'ШАГ 1: Антибиотикотерапия',det:'Карбапенемы (меропенем 1г × 3/сут) или фторхинолоны + метронидазол. Начать немедленно при подтверждённом инфицировании.',urgent:true});
@@ -1676,7 +1704,8 @@ function pageDrain(){
             '<button class="tb'+(ds.loc==='retroperitoneal'?' on':'')+'" onclick="ST.dr.loc=\'retroperitoneal\';R()">🔵 Ретроперитонеальный / хвост</button>'+
           '</div>'+
         '</div>'+
-        '<div style="margin-bottom:13px"><div class="sl">Объём некроза</div>'+
+        '<div style="margin-bottom:13px"><div class="sl">Объём некроза'+
+          (ctNec?'<span style="font-size:10px;color:var(--c);margin-left:7px">✦ заполнено из МСКТ</span>':'')+'</div>'+
           '<div class="tg">'+
             '<button class="tb'+(ds.nec==='small'?' on':'')+'" onclick="ST.dr.nec=\'small\';R()">&lt;50% ПЖ</button>'+
             '<button class="tb'+(ds.nec==='large'?' onr':'')+'" onclick="ST.dr.nec=\'large\';R()">≥50% ПЖ ⚠</button>'+
@@ -1996,7 +2025,8 @@ function pageReport(){
   '<div class="btnrow" style="margin-top:0;padding-top:0">'+
     '<button class="btn btn-s" onclick="goHome()">👥 Список пациентов</button>'+
     '<button class="btn btn-s" onclick="startNew()" style="margin-left:8px">+ Новый пациент</button>'+
-    '<button class="btn btn-s" onclick="exportFile(null)" style="margin-left:8px">📤 Экспорт</button>'+
+    '<button class="btn btn-s" onclick="exportLink(null)" style="margin-left:8px">🔗 Поделиться ссылкой</button>'+
+    '<button class="btn btn-s" onclick="exportFile(null)" style="margin-left:8px">💾 Сохранить файл</button>'+
   '</div>'+
   '</div>';
 }
