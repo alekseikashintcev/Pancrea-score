@@ -187,6 +187,10 @@ var DB = {
   },
   saveCurrent: function(){
     if(VIEW!=='patient') return;
+    // Не сохранять пустых пациентов — нужно хотя бы имя ИЛИ подтверждённый диагноз
+    var hasName = ST.pat && ST.pat.initials && ST.pat.initials.trim().length > 0;
+    var hasDiag = ST.diag && ((ST.diag.pain?1:0)+(ST.diag.enzymes?1:0)+(ST.diag.imaging?1:0)) >= 2;
+    if(!hasName && !hasDiag) return;
     var list = DB.load();
     var now  = Date.now();
     var rec  = JSON.parse(JSON.stringify(ST));
@@ -214,7 +218,7 @@ function exportLink(id){
     var url = location.href.split('#')[0]+'#ps='+encodeURIComponent(b64);
     if(navigator.clipboard&&navigator.clipboard.writeText){
       navigator.clipboard.writeText(url).then(function(){
-        alert('✅ Ссылка скопирована!\n\nОтправьте её коллеге — при открытии данные загрузятся автоматически.');
+        alert('✅ Ссылка скопирована!\n\nОтправьте её коллеге в мессенджере или по email.\nПри открытии данные пациента загрузятся автоматически.');
       },function(){ prompt('Скопируйте ссылку (Ctrl+A → Ctrl+C):', url); });
     } else {
       prompt('Скопируйте ссылку (Ctrl+A → Ctrl+C):', url);
@@ -237,6 +241,155 @@ function exportAllFile(){
   a.href = 'data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(list,null,2));
   a.download = 'pancrea_all_'+new Date().toISOString().slice(0,10)+'.json'; a.click();
 }
+// ═══════════════════════════════════════════════
+// ИМПОРТ XLSX ИЗ ЕМИАЦ
+// ═══════════════════════════════════════════════
+function importXLSX(){
+  var inp = document.createElement('input');
+  inp.type='file'; inp.accept='.xlsx,.xls';
+  inp.onchange = function(){
+    var f = inp.files[0]; if(!f) return;
+    var r = new FileReader();
+    r.onload = function(e){
+      try{
+        // Динамически подгружаем SheetJS если ещё не загружен
+        function parseXLSX(ab){
+          var XLSX = window.XLSX;
+          var wb = XLSX.read(new Uint8Array(ab), {type:'array'});
+          var ws = wb.Sheets[wb.SheetNames[0]];
+          var rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+
+          // ── Маппинг названий из ЕМИАЦ → поля Pancrea-Score ──────────────
+          var MAP = {
+            // Биохимия
+            'мочевина':           {tp:'24h', f:'urea'},
+            'креатинин':          {tp:'24h', f:'creat'},
+            'глюкоза':            {tp:'24h', f:'gluc'},
+            'аланинаминотрансфераза': {tp:'24h', f:'alt_val'},  // для Ranson
+            'аспартатаминотрансфераза': {tp:'24h', f:'ast'},
+            'альфа-амилаза':      {tp:'24h', f:'amylase_lab'}, // диагностика
+            'амилаза':            {tp:'24h', f:'amylase_lab'},
+            'с реактивный белок': {tp:'24h', f:'crp'},
+            'с-реактивный белок': {tp:'24h', f:'crp'},
+            'crp':                {tp:'24h', f:'crp'},
+            'билирубин общий':    {tp:'24h', f:'bili'},
+            'билирубин':          {tp:'24h', f:'bili'},
+            'альбумин':           {tp:'24h', f:'alb'},
+            'общий белок':        {tp:'24h', f:'tp'},
+            'лдг':                {tp:'24h', f:'ldh'},
+            'лактатдегидрогеназа':{tp:'24h', f:'ldh'},
+            'кальций':            {tp:'24h', f:'ca'},
+            'калий':              {tp:'24h', f:'k'},
+            'натрий':             {tp:'24h', f:'na'},
+            // ОАК
+            'лейкоциты':          {tp:'24h', f:'wbc'},
+            'гемоглобин общий':   {tp:'24h', f:'hb'},
+            'гемоглобин':         {tp:'24h', f:'hb'},
+            'расчетный гематокрит': {tp:'24h', f:'hct'},
+            'гематокрит':         {tp:'24h', f:'hct'},
+            'тромбоциты':         {tp:'24h', f:'plt'},
+            // Коагулограмма
+            'международное нормализованное отношение': {tp:'24h', f:'inr'},
+            'мно':                {tp:'24h', f:'inr'},
+            'фибриноген':         {tp:'24h', f:'fibr'},
+            'активированное частичное тромбопластиновое': {tp:'24h', f:'aptt'},
+          };
+
+          var found = {};
+          var patName = '', patDob = '', patSex = '';
+          var currentDate = '';
+
+          rows.forEach(function(row){
+            var cellA = String(row[0]||'').trim();
+            var cellB = String(row[1]||'').replace(',','.').trim();
+
+            // Ищем имя пациента
+            if(!patName && cellA.match(/^[А-ЯЁ]+\s+[А-ЯЁ]+\s+[А-ЯЁ]+\s*№/)){
+              patName = cellA.replace(/№ИБ.*$/i,'').replace(/№.*$/,'').trim();
+            }
+            // Пол и возраст
+            if(!patSex && cellA.toLowerCase().includes('пол:')) {
+              patSex = cellA.toLowerCase().includes('мужской') ? 'm' : 'f';
+              var ageM = cellA.match(/\((\d+)\s*лет/);
+              if(ageM) window._xlsxAge = ageM[1];
+              var dobM = cellA.match(/(\d{2}\.\d{2}\.\d{4})/);
+              if(dobM) patDob = dobM[1];
+            }
+            // Дата взятия
+            if(cellA.toLowerCase().includes('дата взятия')) {
+              var dm = cellA.match(/(\d{2}\.\d{2}\.\d{4})/);
+              if(dm) currentDate = dm[1];
+            }
+
+            // Ищем лабораторные показатели
+            var nameLow = cellA.toLowerCase();
+            Object.keys(MAP).forEach(function(key){
+              if(nameLow.indexOf(key) === 0 || nameLow.startsWith(key)){
+                var val = parseFloat(cellB);
+                if(!isNaN(val) && !found[key]){
+                  found[MAP[key].f] = {val: val, date: currentDate};
+                }
+              }
+            });
+          });
+
+          // ── Применяем найденные данные ────────────────────────────────
+          var filled = 0;
+
+          // Имя пациента
+          if(patName && !ST.pat.initials){
+            ST.pat.initials = patName;
+            filled++;
+          }
+          if(patSex && !ST.pat.sex){ ST.pat.sex = patSex; filled++; }
+          if(window._xlsxAge && !ST.pat.age){ ST.pat.age = window._xlsxAge; filled++; }
+
+          // Амилаза — в диагностику
+          if(found['amylase_lab'] && !ST.diag.amylase){
+            ST.diag.amylase = String(found['amylase_lab'].val);
+            filled++;
+          }
+
+          // Лабораторные данные → точка 24h
+          var labMap = {
+            urea:'urea', creat:'creat', gluc:'gluc', ast:'ast',
+            crp:'crp', bili:'bili', alb:'alb', tp:'tp', ldh:'ldh',
+            ca:'ca', k:'k', na:'na', wbc:'wbc', hb:'hb', hct:'hct', plt:'plt'
+          };
+          var d = D('24h');
+          Object.keys(labMap).forEach(function(src){
+            if(found[src] !== undefined && !d[labMap[src]]){
+              d[labMap[src]] = String(found[src].val);
+              filled++;
+            }
+          });
+
+          if(filled > 0){
+            DB.saveCurrent();
+            R();
+            alert('✅ Загружено из ЕМИАЦ: ' + filled + ' показателей.\n\nПроверьте данные на шаге «Лаборатория».');
+          } else {
+            alert('⚠️ Данные не распознаны.\nУбедитесь, что файл — это выгрузка лабораторных результатов из ЕМИАЦ.');
+          }
+        }
+
+        if(window.XLSX){
+          parseXLSX(e.target.result);
+        } else {
+          // Подгружаем SheetJS динамически
+          var s = document.createElement('script');
+          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+          s.onload = function(){ parseXLSX(e.target.result); };
+          s.onerror = function(){ alert('Нет интернета для загрузки библиотеки XLSX.\nСкопируйте файл на компьютер с интернетом или попросите IT включить локальный режим.'); };
+          document.head.appendChild(s);
+        }
+      }catch(err){ alert('Ошибка чтения файла: '+err.message); }
+    };
+    r.readAsArrayBuffer(f);
+  };
+  inp.click();
+}
+
 function importFile(){
   var inp = document.createElement('input');
   inp.type='file'; inp.accept='.json';
@@ -320,7 +473,7 @@ function patScores(p){
   // Возвращает {tp: {sc, ran, dzh, sev}} для каждого заполненного таймпоинта
   var origST=ST, out={};
   ST=p;
-  ['24h','48h','72h'].forEach(function(tp){
+  ['24h','48h','72h','96h'].forEach(function(tp){
     var d=p.data&&p.data[tp];
     if(!d||d.temp===undefined) return;
     out[tp]={sc:calc(tp), ran:calcRanson(), dzh:calcDzhanelidge(tp)};
@@ -340,7 +493,7 @@ function buildHome(){
   var total=list.length, heavy=0, mid=0, light=0;
   list.forEach(function(p){
     var sc=patScores(p);
-    var tps=['72h','48h','24h'];
+    var tps=['96h','72h','48h','24h'];
     for(var i=0;i<tps.length;i++){
       if(sc[tps[i]]){
         var sev=sc[tps[i]].sev;
@@ -360,7 +513,7 @@ function buildHome(){
     var abbr=patAbbr(p2.initials);
     var sc=patScores(p);
     var lastSev='g', lastSevL='Лёгкий';
-    ['72h','48h','24h'].forEach(function(tp){
+    ['96h','72h','48h','24h'].forEach(function(tp){
       if(sc[tp]&&!sc['_found']){sc['_found']=true;lastSev=sc[tp].sev;lastSevL=sc[tp].sev==='r'?'Тяжёлый':sc[tp].sev==='y'?'Средний':'Лёгкий';}
     });
     var sevC=lastSev==='r'?'var(--r)':lastSev==='y'?'var(--y)':'var(--g)';
@@ -389,17 +542,17 @@ function buildHome(){
       '<td style="padding:9px 8px;font-size:12px;color:var(--t2);border:1px solid var(--bd)">'+
         (etioMap[p.etio]||'—')+
       '</td>'+
-      tpCell('24h')+tpCell('48h')+tpCell('72h')+
+      tpCell('24h')+tpCell('48h')+tpCell('72h')+tpCell('96h')+
       '<td style="padding:9px 8px;text-align:center;border:1px solid var(--bd)">'+
         '<span style="font-weight:700;font-size:12px;color:'+sevC+'">'+lastSevL+'</span>'+
       '</td>'+
       '<td style="padding:9px 8px;font-size:11px;color:var(--t3);white-space:nowrap;border:1px solid var(--bd)">'+saved+'</td>'+
       '<td style="padding:6px;text-align:center;white-space:nowrap;border:1px solid var(--bd)">'+
         '<button onclick="event.stopPropagation();exportLink(\''+p.id+'\')" title="Скопировать ссылку для коллеги" '+
-          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--c);padding:3px 8px;cursor:pointer;font-size:11px;margin:1px;font-weight:600">🔗 Поделиться</button>'+
-        '<button onclick="event.stopPropagation();exportFile(\''+p.id+'\')" title="Сохранить файл" '+
-          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--t2);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">💾</button>'+
-        '<button onclick="event.stopPropagation();if(confirm(\'Удалить?\')){ DB.del(\''+p.id+'\');renderHome(); }" title="Удалить" '+
+          'style="background:none;border:1px solid var(--c)55;border-radius:5px;color:var(--c);padding:3px 9px;cursor:pointer;font-size:11px;margin:1px;font-weight:600">🔗 Поделиться</button>'+
+        '<button onclick="event.stopPropagation();exportFile(\''+p.id+'\')" title="Скачать файл резервной копии" '+
+          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--t3);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px" title="Резервная копия">💾</button>'+
+        '<button onclick="event.stopPropagation();if(confirm(\'Удалить пациента?\')){ DB.del(\''+p.id+'\');renderHome(); }" '+
           'style="background:none;border:1px solid #ef434355;border-radius:5px;color:var(--r);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">✕</button>'+
       '</td>'+
     '</tr>';
@@ -425,7 +578,7 @@ function buildHome(){
         '<td style="padding:7px 10px;font-weight:700;color:var(--c);border:1px solid var(--bd)">'+abbr+
           (p2.age?' <span style="font-weight:400;font-size:11px;color:var(--t3)">'+p2.age+'л</span>':'')+
         '</td>'+
-        cCell('24h')+cCell('48h')+cCell('72h')+
+        cCell('24h')+cCell('48h')+cCell('72h')+cCell('96h')+
       '</tr>';
     }).join('');
 
@@ -462,10 +615,13 @@ function buildHome(){
         '+ Новый пациент</button>'+
       '<button onclick="importFile()" '+
         'style="padding:10px 12px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit">'+
-        '📂 Импорт JSON</button>'+
+        '📂 Открыть по ссылке / файлу</button>'+
+      '<button onclick="importXLSX()" '+
+        'style="padding:10px 12px;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit">'+
+        '📊 Загрузить из ЕМИАЦ</button>'+
       '<button onclick="exportAllFile()" '+
         'style="padding:10px 12px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit">'+
-        '📥 Скачать всё</button>'+
+        '💾 Резервная копия</button>'+
     '</div>'+
   '</div>'+
 
@@ -498,10 +654,16 @@ function buildHome(){
     compTable
   )+
 
-  '<div style="text-align:center;font-size:11px;color:var(--t3);padding:12px 0">'+
-    '💾 Данные сохраняются автоматически · '+
-    '📤 Используйте «Скачать всё» для резервной копии или передачи коллеге'+
+  '<div style="text-align:center;font-size:11px;color:var(--t3);padding:12px 0 4px">'+
+    '💾 Данные хранятся в этом браузере (до 50 пациентов) · '+
+    '🔗 «Поделиться» — отправить ссылку коллеге · при открытии данные загрузятся автоматически'+
   '</div>'+
+  (total>0?
+    '<div style="text-align:center;padding-bottom:20px">'+
+      '<button onclick="cleanEmptyPatients()" '+
+        'style="background:none;border:none;color:var(--t3);font-size:11px;cursor:pointer;text-decoration:underline;font-family:inherit">'+
+        '🗑 Удалить пустые / тестовые записи</button>'+
+    '</div>':'')+
   '</div>';
 }
 
@@ -510,12 +672,27 @@ var ST = {
   diag:{pain:false,enzymes:false,imaging:false,amylase:'',lipase:'',imgType:''},
   etio:'', onset:'', onsetT:'',
   pat:{initials:'',sex:'',age:'',height:'',weight:'',chronicYes:false,chronic:'none',chronicDetails:''},
-  data:{'24h':{},'48h':{},'72h':{}},
+  data:{'24h':{},'48h':{},'72h':{},'96h':{}},
   rem:{},
   dr:{inf:false,timing:'late',loc:'perigastric',nec:'small',stab:'stable'},
   surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''},
   surgCalcDone:false
 };
+
+function cleanEmptyPatients(){
+  var list = DB.load();
+  var before = list.length;
+  list = list.filter(function(p){
+    var hasName = p.pat && p.pat.initials && p.pat.initials.trim().length > 0;
+    var hasDiag = p.diag && ((p.diag.pain?1:0)+(p.diag.enzymes?1:0)+(p.diag.imaging?1:0)) >= 2;
+    return hasName || hasDiag;
+  });
+  var removed = before - list.length;
+  if(removed === 0){ alert('Пустых записей не найдено.'); return; }
+  DB.saveAll(list);
+  alert('Удалено пустых записей: ' + removed);
+  renderHome();
+}
 
 function startNew(){
   DB.saveCurrent();
@@ -523,7 +700,7 @@ function startNew(){
     diag:{pain:false,enzymes:false,imaging:false,amylase:'',lipase:'',imgType:''},
     etio:'',onset:'',onsetT:'',
     pat:{initials:'',sex:'',age:'',height:'',weight:'',chronicYes:false,chronic:'none',chronicDetails:''},
-    data:{'24h':{},'48h':{},'72h':{}},
+    data:{'24h':{},'48h':{},'72h':{},'96h':{}},
     rem:{},
     dr:{inf:false,timing:'late',loc:'perigastric',nec:'small',stab:'stable'},
     surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''},
@@ -1190,6 +1367,14 @@ function pageLabs(){
   var na=pf(d.na),k=pf(d.k),alb=pf(d.alb),tp2=pf(d.tp),crp=pf(d.crp);
   return '<div class="fi-anim">'+
   tpTabs()+
+  '<div style="margin-bottom:12px;padding:12px 14px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">'+
+    '<div style="font-size:13px;color:#2e7d32;flex:1;min-width:180px">'+
+      '<b>Быстрый ввод из ЕМИАЦ</b> — загрузите XLSX-выгрузку и поля заполнятся автоматически'+
+    '</div>'+
+    '<button onclick="importXLSX()" style="padding:8px 16px;background:#2e7d32;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap">'+
+      '📊 Загрузить XLSX из ЕМИАЦ'+
+    '</button>'+
+  '</div>'+
   '<div class="card">'+
     '<div class="ch"><span>🩸</span><span class="ct">ОАК</span></div>'+
     '<div class="cb"><div class="fg">'+
@@ -1497,7 +1682,7 @@ function pageScores(){
 
 // ── ДИНАМИКА ───────────────────────────────────
 function pageDyn(){
-  var tps=['24h','48h','72h'];
+  var tps=['24h','48h','72h','96h'];
   function col(c){ return c==='g'?'var(--g)':c==='y'?'var(--y)':'var(--r)'; }
   var rows=[
     {lbl:'BISAP',max:5,get:function(sc){return sc.bisap;},gc:function(sc){return sc.bisap>=3?'r':sc.bisap>=2?'y':'g';}},
@@ -1506,13 +1691,20 @@ function pageDyn(){
     {lbl:'mCTSI',max:10,get:function(sc){return sc.mctsi;},gc:function(sc){return sc.mctsi>=7?'r':sc.mctsi>=4?'y':'g';}},
     {lbl:'Ranson',max:11,getR:true,get:function(){return calcRanson().score;},gc:function(){var s=calcRanson().score;return s>=5?'r':s>=3?'y':'g';}},
     {lbl:'Джанелидзе',max:13,getDzh:true,get:function(sc,t){return calcDzhanelidge(t).score;},gc:function(sc,t){var s=calcDzhanelidge(t).score;return s>=5?'r':s>=2?'y':'g';}},
+    {lbl:'SIRS (крит.)',max:4,get:function(sc){return sc.sirs;},gc:function(sc){return sc.sirs>=2?'r':'g';},
+      extra:function(t){
+        var dt=D(t); var st=dt.sirs_type||'none';
+        if(st==='none') return '';
+        return '<div style="font-size:10px;color:var(--t3);margin-top:2px">'+(st==='persistent'?'🔴 Персист.':st==='transient'?'⏱ Транзит.':'')+'</div>';
+      }
+    },
     {lbl:'NAPP г/л',max:60,get:function(sc){return sc.napp?parseFloat(sc.napp):null;},gc:function(sc){return sc.napp&&parseFloat(sc.napp)>30?'r':'g';}},
     {lbl:'CРБ мг/л',max:400,get:function(sc){return sc.crp;},gc:function(sc){return sc.crp?(sc.crp>=150?'r':sc.crp>=100?'y':'g'):'g';}}
   ];
   return '<div class="fi-anim">'+
-  '<div class="al al-i">Данные 24ч / 48ч / 72ч вводятся на вкладках «Витальные» и «Анализы»</div>'+
+  '<div class="al al-i">Данные 24ч / 48ч / 72ч / 96ч вводятся на вкладках «Витальные» и «Анализы»</div>'+
   '<div class="card">'+
-    '<div class="ch"><span>📈</span><span class="ct">Сравнение 24 / 48 / 72 часа</span></div>'+
+    '<div class="ch"><span>📈</span><span class="ct">Сравнение 24 / 48 / 72 / 96 часов</span></div>'+
     '<div class="cb" style="padding:0;overflow-x:auto">'+
       '<table class="ctbl">'+
         '<thead><tr><th>Шкала</th>'+tps.map(function(t){return '<th style="color:var(--c);text-align:center">'+t+'</th>';}).join('')+'<th>Тренд</th></tr></thead>'+
@@ -1542,6 +1734,7 @@ function pageDyn(){
                 var pct=v!==null&&!isNaN(v)?Math.min(v/row.max*100,100):0;
                 return '<td style="text-align:center">'+
                   '<div class="tpv" style="color:'+c+'">'+(v!==null&&!isNaN(v)?v:'—')+'</div>'+
+                  (row.extra?row.extra(t2):'')+
                   '<div style="height:3px;background:var(--bd);border-radius:2px;margin-top:3px;overflow:hidden">'+
                     '<div style="height:100%;width:'+pct+'%;background:'+c+'"></div>'+
                   '</div>'+
@@ -1553,17 +1746,20 @@ function pageDyn(){
       '</table>'+
     '</div>'+
   '</div>'+
-  '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px">'+
+  '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:12px">'+
     tps.map(function(t){
       if(!ST.data[t]||ST.data[t].temp===undefined) return '<div class="card" style="padding:13px;text-align:center;color:var(--t3);font-size:12px">Нет данных<br><b>'+t+'</b></div>';
       var sc=calc(t);
       var sv=sc.apache>=8||sc.bisap>=3||sc.sofa>=6?'r':sc.apache>=5||sc.bisap>=2||sc.sofa>=3?'y':'g';
       var c=sv==='r'?'var(--r)':sv==='y'?'var(--y)':'var(--g)';
       var l=sv==='r'?'ТЯЖЁЛЫЙ':sv==='y'?'СРЕДНИЙ':'ЛЁГКИЙ';
+      var sirsT=ST.data[t]&&ST.data[t].sirs_type?ST.data[t].sirs_type:'none';
+      var sirsStr=sc.sirs+'/4'+(sirsT==='persistent'?' · 🔴 Персист.':sirsT==='transient'?' · ⏱ Транзит.':sc.sirs>=2?' · SIRS ✓':'');
       return '<div class="card" style="border-color:'+c+'44"><div style="padding:11px;text-align:center">'+
         '<div style="font-family:\'Courier New\';font-size:17px;color:var(--c);font-weight:700">'+t+'</div>'+
         '<div style="font-weight:700;color:'+c+';font-size:13px;margin-top:4px">'+l+'</div>'+
         '<div style="font-size:10px;color:var(--t3);margin-top:3px">AP'+sc.apache+'·BI'+sc.bisap+'·SO'+sc.sofa+'·CT'+sc.mctsi+'</div>'+
+        '<div style="font-size:10px;color:'+(sc.sirs>=2?'var(--r)':'var(--t3)')+';margin-top:2px">SIRS: '+sirsStr+'</div>'+
       '</div></div>';
     }).join('')+
   '</div>'+
@@ -1604,18 +1800,31 @@ var REMS={
     {id:'c6',t:'ТАП под КТ при подозрении на инфицирование',p:'y'},
     {id:'c7',t:'Оценка нутритивного статуса, энтеральное питание',p:'y'},
     {id:'c8',t:'КЩС при дыхательной недостаточности',p:'y'}
+  ],
+  '96h':[
+    {id:'d1',t:'Итоговая оценка тяжести: BISAP + APACHE II + SOFA + mCTSI',p:'r'},
+    {id:'d2',t:'Решение о тактике: консервативное лечение vs инвазия',p:'r'},
+    {id:'d3',t:'ОАК + биохимия + коагулограмма (контроль)',p:'r'},
+    {id:'d4',t:'КТ с контрастом — при нарастании некроза или клинике сепсиса',p:'r'},
+    {id:'d5',t:'NAPP (несвязанные с альбумином протеины) — расчёт динамики',p:'r'},
+    {id:'d6',t:'Прокальцитонин — финальная оценка риска инфицирования',p:'r'},
+    {id:'d7',t:'Оценка показаний к step-up (дренирование / VARD / некрэктомия)',p:'y'},
+    {id:'d8',t:'Нутритивная поддержка: назоеюнальный зонд при тяжёлом ОП',p:'y'},
+    {id:'d9',t:'Консультация хирурга при наличии панкреонекроза',p:'y'},
+    {id:'d10',t:'Контроль гликемии (цель <10 ммоль/л), инсулинотерапия',p:'y'}
   ]
 };
 function pageRem(){
   return '<div class="fi-anim">'+
-  ['24h','48h','72h'].map(function(tp){
+  ['24h','48h','72h','96h'].map(function(tp){
     var items=REMS[tp];
     var done=items.filter(function(i){return ST.rem[tp+i.id];}).length;
     var pct=Math.round(done/items.length*100);
+    var tpLabel={'24':'При поступлении','48':'Первые сутки','72':'Вторые сутки','96':'Третьи сутки — итог I фазы'}[parseInt(tp)];
     return '<div class="card" style="margin-bottom:11px">'+
       '<div class="ch" style="justify-content:space-between;flex-wrap:wrap;gap:6px">'+
         '<span style="font-family:\'Courier New\';font-size:15px;font-weight:700;color:var(--c)">'+tp+'</span>'+
-        '<span class="ct">'+{24:'При поступлении',48:'Первые сутки',72:'Вторые сутки'}[parseInt(tp)]+'</span>'+
+        '<span class="ct">'+tpLabel+'</span>'+
         '<div style="display:flex;align-items:center;gap:7px;margin-left:auto">'+
           '<span style="font-size:11px;color:var(--t3)">'+done+'/'+items.length+'</span>'+
           '<div style="width:70px;height:4px;background:var(--bd);border-radius:2px;overflow:hidden">'+
@@ -1642,9 +1851,8 @@ function pageRem(){
 // ── ДРЕНИРОВАНИЕ ───────────────────────────────
 function pageDrain(){
   var ds=ST.dr;
-  // Авто-синхронизация объёма некроза из МСКТ
   var ctNec=null;
-  ['72h','48h','24h'].forEach(function(tp){
+  ['96h','72h','48h','24h'].forEach(function(tp){
     if(!ctNec&&ST.data[tp]&&ST.data[tp].nec&&ST.data[tp].nec!=='none') ctNec=ST.data[tp].nec;
   });
   if(ctNec){
@@ -2025,7 +2233,7 @@ function pageReport(){
 function tpTabs(){
   return '<div class="tpt">'+
     '<span style="font-size:11px;color:var(--t3);align-self:center;text-transform:uppercase;letter-spacing:.06em;margin-right:3px">Часы:</span>'+
-    ['24h','48h','72h'].map(function(t){
+    ['24h','48h','72h','96h'].map(function(t){
       return '<button class="tpb'+(ST.tp===t?' on':'')+'" onclick="ST.tp=\''+t+'\';R()">'+t+'</button>';
     }).join('')+
   '</div>';
