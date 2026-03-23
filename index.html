@@ -228,22 +228,439 @@ function exportLink(id){
 function exportFile(id){
   var p = id ? DB.get(id) : JSON.parse(JSON.stringify(ST));
   if(!p) return;
-  var name = ((p.pat&&p.pat.initials?p.pat.initials.replace(/\s+/g,'_'):'patient')
-    +'_'+new Date(p.updatedAt||Date.now()).toISOString().slice(0,10));
+  var initials = p.pat&&p.pat.initials ? p.pat.initials.replace(/\s+/g,'_') : 'пациент';
+  var date = new Date(p.updatedAt||Date.now()).toISOString().slice(0,10);
+  var name = initials+'_'+date;
   var a = document.createElement('a');
   a.href = 'data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(p,null,2));
   a.download = name+'.json'; a.click();
 }
+
+// Сохранить текущего пациента на диск
+function saveCurrentToDisk(){
+  DB.saveCurrent();
+  exportFile(null);
+}
+
+// Сохранить всех пациентов на диск
 function exportAllFile(){
   var list = DB.load();
-  if(!list.length){ alert('Нет пациентов'); return; }
+  if(!list.length){ alert('Нет пациентов для сохранения'); return; }
   var a = document.createElement('a');
   a.href = 'data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(list,null,2));
-  a.download = 'pancrea_all_'+new Date().toISOString().slice(0,10)+'.json'; a.click();
+  a.download = 'pancrea_все_пациенты_'+new Date().toISOString().slice(0,10)+'.json'; a.click();
 }
+
+// Загрузить пациента(ов) из JSON-файла на диске
+function importFile(){
+  var inp = document.createElement('input');
+  inp.type='file'; inp.accept='.json';
+  inp.onchange = function(){
+    var f=inp.files[0]; if(!f) return;
+    var r=new FileReader();
+    r.onload=function(e){
+      try{
+        var data = JSON.parse(e.target.result);
+        // Один пациент или массив?
+        var recs = Array.isArray(data) ? data : [data];
+        var list = DB.load();
+        var added=0, updated=0;
+        recs.forEach(function(rec){
+          if(!rec||!rec.diag) return;
+          // Если пациент с таким ID уже есть — обновляем (не дублируем)
+          var idx = list.findIndex(function(x){ return x.id===rec.id; });
+          if(idx>=0){
+            // Берём более свежую запись
+            if((rec.updatedAt||0) >= (list[idx].updatedAt||0)){
+              list[idx]=rec; updated++;
+            }
+          } else {
+            if(!rec.id) rec.id='p'+Date.now()+Math.floor(Math.random()*10000);
+            rec.savedAt = rec.savedAt||Date.now();
+            rec.updatedAt = rec.updatedAt||Date.now();
+            list.unshift(rec); added++;
+          }
+        });
+        DB.saveAll(list);
+        var msg = [];
+        if(added)   msg.push('Добавлено новых: '+added);
+        if(updated) msg.push('Обновлено: '+updated);
+        alert('✅ '+msg.join(' · ')+'\n\nПациент загружен и доступен для продолжения работы.');
+        renderHome();
+      }catch(err){ alert('Ошибка файла: '+err.message); }
+    };
+    r.readAsText(f,'utf-8');
+  };
+  inp.click();
+}
+// Читает sharedStrings + sheet1 напрямую из ZIP
+// ═══════════════════════════════════════════════
+var _xlsxParser = (function(){
+  // Минимальный ZIP-читатель (без декомпрессии deflate — используем нативный браузер)
+  function readZip(ab){
+    // Ищем файлы через Central Directory в конце ZIP
+    var dv = new DataView(ab);
+    var u8 = new Uint8Array(ab);
+    var len = u8.length;
+    // Найти End of Central Directory (сигнатура 0x06054b50)
+    var eocd = -1;
+    for(var i=len-22;i>=Math.max(0,len-65536);i--){
+      if(dv.getUint32(i,true)===0x06054b50){eocd=i;break;}
+    }
+    if(eocd<0) return null;
+    var cdOffset = dv.getUint32(eocd+16,true);
+    var cdCount  = dv.getUint16(eocd+8,true);
+    var files = {};
+    var pos = cdOffset;
+    for(var f=0;f<cdCount;f++){
+      if(dv.getUint32(pos,true)!==0x02014b50) break;
+      var cmethod  = dv.getUint16(pos+10,true);
+      var csize    = dv.getUint32(pos+20,true);
+      var usize    = dv.getUint32(pos+24,true);
+      var fnLen    = dv.getUint16(pos+28,true);
+      var extraLen = dv.getUint16(pos+30,true);
+      var cmtLen   = dv.getUint16(pos+32,true);
+      var lhOffset = dv.getUint32(pos+42,true);
+      var fname = '';
+      for(var c=0;c<fnLen;c++) fname += String.fromCharCode(u8[pos+46+c]);
+      files[fname] = {method:cmethod, csize:csize, usize:usize, lhOffset:lhOffset};
+      pos += 46 + fnLen + extraLen + cmtLen;
+    }
+    // Извлечь данные файла по Local File Header
+    function extract(fname){
+      var e = files[fname]; if(!e) return null;
+      var lh = e.lhOffset;
+      if(dv.getUint32(lh,true)!==0x04034b50) return null;
+      var fnl = dv.getUint16(lh+26,true);
+      var exl = dv.getUint16(lh+28,true);
+      var dataStart = lh+30+fnl+exl;
+      var slice = u8.slice(dataStart, dataStart+e.csize);
+      if(e.method===0) return slice; // stored
+      if(e.method===8){
+        // deflate — используем DecompressionStream если доступен
+        try{
+          // Синхронного API нет — возвращаем promise-like объект
+          return {deflated:slice, usize:e.usize};
+        }catch(ex){return null;}
+      }
+      return null;
+    }
+    return {files:files, extract:extract};
+  }
+
+  function u8toString(u8){
+    var s=''; for(var i=0;i<u8.length;i++) s+=String.fromCharCode(u8[i]); return s;
+  }
+
+  // Декодировать UTF-8 байты в строку
+  function utf8(u8){
+    try{ return new TextDecoder('utf-8').decode(u8); }
+    catch(e){ return u8toString(u8); }
+  }
+
+  // Распаковать deflate через DecompressionStream (Chrome 80+, Firefox 113+)
+  function inflateAsync(compressed){
+    return new Response(
+      new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
+    ).arrayBuffer().then(function(ab){ return new Uint8Array(ab); });
+  }
+
+  // Извлечь текст из XML (sharedStrings или sheet)
+  function extractTexts(xml){
+    var texts = [];
+    var re = /<t(?:\s[^>]*)?>([^<]*)<\/t>/g;
+    var m;
+    while((m=re.exec(xml))!==null){
+      texts.push(m[1]
+        .replace(/&amp;/g,'&')
+        .replace(/&lt;/g,'<')
+        .replace(/&gt;/g,'>')
+        .replace(/&quot;/g,'"')
+        .replace(/&#x([0-9a-fA-F]+);/g,function(_,h){return String.fromCharCode(parseInt(h,16));})
+        .replace(/&#(\d+);/g,function(_,d){return String.fromCharCode(parseInt(d,10));})
+      );
+    }
+    return texts;
+  }
+
+  // Парсить sheet1 и вернуть массив строк [{col,row,type,val}]
+  function parseSheet(xml, strings){
+    var rows = {};
+    var re = /<c\s+r="([A-Z]+)(\d+)"(?:[^>]*\st="([^"]*)")?[^>]*>(?:[^<]*<v>([^<]*)<\/v>)?/g;
+    var m;
+    while((m=re.exec(xml))!==null){
+      var col=m[1], row=parseInt(m[2]), type=m[3]||'', val=m[4]||'';
+      if(!rows[row]) rows[row]=[];
+      var realVal = (type==='s'&&strings)?strings[parseInt(val)]||'':val;
+      rows[row].push({col:col,val:realVal});
+    }
+    // Перевести в массив строк (массив массивов значений по столбцам A..H)
+    var result=[];
+    var maxRow=Math.max.apply(null,Object.keys(rows).map(Number));
+    for(var r=1;r<=maxRow;r++){
+      var cells=rows[r]||[];
+      var row2={};
+      cells.forEach(function(c){row2[c.col]=c.val;});
+      result.push(row2);
+    }
+    return result;
+  }
+
+  // Главная функция — возвращает Promise<Array<Object>> (строки как {A,B,C,...})
+  function parse(arrayBuffer){
+    var zip = readZip(arrayBuffer);
+    if(!zip) return Promise.reject('Не удалось прочитать ZIP');
+
+    // Список файлов для извлечения
+    var needed = ['xl/sharedStrings.xml','xl/worksheets/sheet1.xml'];
+
+    function getFile(name){
+      var raw = zip.extract(name);
+      if(!raw) return Promise.resolve('');
+      if(raw.deflated){
+        return inflateAsync(raw.deflated).then(function(u8){return utf8(u8);});
+      }
+      return Promise.resolve(utf8(raw));
+    }
+
+    return Promise.all([getFile(needed[0]),getFile(needed[1])]).then(function(res){
+      var ssXml=res[0], shXml=res[1];
+      var strings = extractTexts(ssXml);
+      var rows = parseSheet(shXml, strings);
+      return rows;
+    });
+  }
+
+  return {parse:parse};
+})();
+
 // ═══════════════════════════════════════════════
 // ИМПОРТ XLSX ИЗ ЕМИАЦ
 // ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════
+// ПАРСЕР КТ-ЗАКЛЮЧЕНИЯ ИЗ WORD (.docx)
+// Офлайн — читает ZIP напрямую, без CDN
+// ═══════════════════════════════════════════════
+function importCTWord(){
+  var inp = document.createElement('input');
+  inp.type='file'; inp.accept='.docx,.doc';
+  inp.onchange = function(){
+    var f = inp.files[0]; if(!f) return;
+    var r = new FileReader();
+    r.onload = function(e){
+      try{
+        // Читаем docx как ZIP → извлекаем document.xml
+        var zip = _xlsxParser && _xlsxParser._readZip ? _xlsxParser._readZip(e.target.result) : null;
+        // Используем тот же ZIP-движок что и для XLSX
+        _readDocxText(e.target.result).then(function(text){
+          applyCTText(text);
+        }).catch(function(err){
+          alert('Ошибка чтения файла: '+err);
+        });
+      }catch(err){ alert('Ошибка: '+err.message); }
+    };
+    r.readAsArrayBuffer(f);
+  };
+  inp.click();
+}
+
+function _readDocxText(ab){
+  // docx = ZIP; ищем word/document.xml
+  return new Promise(function(resolve, reject){
+    try{
+      var u8 = new Uint8Array(ab);
+      var dv = new DataView(ab);
+      var len = u8.length;
+      // Ищем End of Central Directory
+      var eocd=-1;
+      for(var i=len-22;i>=Math.max(0,len-65536);i--){
+        if(dv.getUint32(i,true)===0x06054b50){eocd=i;break;}
+      }
+      if(eocd<0){reject('Не ZIP-архив');return;}
+      var cdOffset=dv.getUint32(eocd+16,true);
+      var cdCount=dv.getUint16(eocd+8,true);
+      var files={};
+      var pos=cdOffset;
+      for(var fi=0;fi<cdCount;fi++){
+        if(dv.getUint32(pos,true)!==0x02014b50) break;
+        var method=dv.getUint16(pos+10,true);
+        var csize=dv.getUint32(pos+20,true);
+        var usize=dv.getUint32(pos+24,true);
+        var fnLen=dv.getUint16(pos+28,true);
+        var exLen=dv.getUint16(pos+30,true);
+        var cmLen=dv.getUint16(pos+32,true);
+        var lhOff=dv.getUint32(pos+42,true);
+        var fname='';
+        for(var c=0;c<fnLen;c++) fname+=String.fromCharCode(u8[pos+46+c]);
+        files[fname]={method:method,csize:csize,usize:usize,lhOff:lhOff};
+        pos+=46+fnLen+exLen+cmLen;
+      }
+      function extract(name){
+        var e=files[name]; if(!e) return null;
+        var lh=e.lhOff;
+        var fnl=dv.getUint16(lh+26,true);
+        var exl=dv.getUint16(lh+28,true);
+        var ds=lh+30+fnl+exl;
+        var sl=u8.slice(ds,ds+e.csize);
+        if(e.method===0) return Promise.resolve(new TextDecoder('utf-8').decode(sl));
+        if(e.method===8){
+          return new Response(
+            new Blob([sl]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
+          ).arrayBuffer().then(function(a){return new TextDecoder('utf-8').decode(new Uint8Array(a));});
+        }
+        return null;
+      }
+      // Ищем document.xml
+      var docFile = files['word/document.xml'] ? 'word/document.xml' :
+                    Object.keys(files).find(function(k){return k.endsWith('document.xml');});
+      if(!docFile){reject('word/document.xml не найден');return;}
+      var p = extract(docFile);
+      if(!p){reject('Не удалось извлечь XML');return;}
+      Promise.resolve(p).then(function(xml){
+        // Убираем XML-теги, получаем чистый текст
+        var text = xml.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ')
+          .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"')
+          .replace(/&#x([0-9a-fA-F]+);/g,function(_,h){return String.fromCharCode(parseInt(h,16));});
+        resolve(text);
+      }).catch(reject);
+    }catch(ex){reject(ex.message);}
+  });
+}
+
+function applyCTText(text){
+  var t = text.toLowerCase();
+  var d = D(ST.tp);
+  var filled = [], warnings = [];
+
+  // ── 1. BALTHAZAR ──────────────────────────────
+  // КЛЮЧЕВОЙ МОМЕНТ: в российских КТ-заключениях КИРИЛЛИЧЕСКИЕ буквы:
+  // С (U+0421/0441) выглядит как латинская C, но это ДРУГОЙ КОД Unicode.
+  // Явно нормализуем кириллические омоглифы → латинские.
+  function normBalt(ch){
+    ch = ch.toLowerCase();
+    var cmap = {
+      '\u0430':'a',                    // кир а → A
+      '\u0432':'b', '\u0431':'b',     // кир в,б → B
+      '\u0441':'c', '\u0433':'c',     // кир с,г → C (с — главный случай!)
+      '\u0434':'d',                    // кир д → D
+      '\u0435':'e'                     // кир е → E
+    };
+    return cmap[ch] || ch;
+  }
+  var bmap = {'a':'0','b':'1','c':'2','d':'3','e':'4'};
+  var baltGrade = null;
+  // Ищем любую одиночную букву (лат. или кирилл.) после ключевых слов
+  var baltPatterns = [
+    /balthazar\s*(?:ст(?:\.\s*|\s+)?|степен[ьи]\s*)?([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i,
+    /тип\s*([a-zA-Z\u0410-\u044f])\s*по\s*balthazar/i,
+    /по\s*(?:balthazar|балтазар)\s*(?:ст\.?\s*)?([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i,
+    /(?:balthazar|балтазар)\s*(?:ст\.?\s*)([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i
+  ];
+  var m = null;
+  for(var bi=0;bi<baltPatterns.length;bi++){
+    m = t.match(baltPatterns[bi]);
+    if(m) break;
+  }
+  if(m){
+    var letter = normBalt(m[1]);
+    baltGrade = bmap[letter];
+    var gradeNames = {'0':'A — норма','1':'B — увеличение ПЖ','2':'C — воспаление клетчатки','3':'D — жидкостная зона','4':'E — ≥2 зон/газ'};
+    if(baltGrade !== undefined){
+      d.ctg = baltGrade;
+      filled.push('Balthazar '+gradeNames[baltGrade]);
+    } else {
+      warnings.push('Balthazar: буква «'+m[1]+'» (код '+m[1].charCodeAt(0)+') не распознана — укажите вручную');
+    }
+  } else {
+    warnings.push('Balthazar: степень не найдена в тексте — укажите вручную');
+  }
+
+  // ── 2. НЕКРОЗ ────────────────────────────────
+  // "некроз ... 40%", ">50%", "30-50", "менее 30", "отсутствует"
+  var necSet = false;
+  // Нет некроза
+  if(/некроз\s*(не\s*определяется|отсутствует|не\s*выявлен|не\s*выявлено)/i.test(text)){
+    d.nec='none'; filled.push('Некроз: нет (0%)'); necSet=true;
+  }
+  if(!necSet){
+    var necRe = /некро[зс][а-я]*\s*[\w\s%\/]*?([\d]+)\s*%/i;
+    var nm2 = text.match(necRe);
+    if(!nm2) nm2 = text.match(/([\d]+)\s*%\s*некро[зс]/i);
+    if(nm2){
+      var pct = parseInt(nm2[1]);
+      if(pct===0){d.nec='none';filled.push('Некроз: нет');}
+      else if(pct<30){d.nec='lt30';filled.push('Некроз: '+pct+'% (<30%)');}
+      else if(pct<=50){d.nec='30to50';filled.push('Некроз: '+pct+'% (30–50%)');}
+      else{d.nec='gt50';filled.push('Некроз: '+pct+'% (>50%)');}
+      necSet=true;
+    }
+    // Словесные описания
+    if(!necSet){
+      if(/более\s*50|свыше\s*50|>50|gt50/i.test(text)){d.nec='gt50';filled.push('Некроз: >50%');necSet=true;}
+      else if(/30.{0,5}50|умеренн|значительн/i.test(t)&&/некро/i.test(t)){d.nec='30to50';filled.push('Некроз: 30–50%');necSet=true;}
+      else if(/менее\s*30|<\s*30|до\s*30|треть|1\/3/i.test(text)&&/некро/i.test(t)){d.nec='lt30';filled.push('Некроз: <30%');necSet=true;}
+    }
+    // Если Balthazar C и некроз не описан → нет некроза
+    if(!necSet && baltGrade==='2'){d.nec='none';filled.push('Некроз: не описан → 0%');necSet=true;}
+    if(!necSet && (baltGrade==='0'||baltGrade==='1')){d.nec='none';necSet=true;}
+    if(!necSet) warnings.push('Некроз: не распознан — укажите вручную');
+  }
+
+  // ── 3. ВНЕПАНКРЕАТИЧЕСКИЕ ОСЛОЖНЕНИЯ ─────────
+  // выпот в брюшной/плевральной полости, тромбоз, псевдоаневризма, жидкость
+  var extKeys = ['выпот','жидкость в брюшн','жидкость в плевр','асцит','тромбоз',
+                 'псевдоаневризм','жидкостное скоплени','парапанкреатическ жидк',
+                 'инфильтрация перипанкреатич'];
+  var hasExt = extKeys.some(function(k){return t.indexOf(k)>=0;});
+  // Жидкостное образование в ПЖ само по себе — не внепанкр. осложнение (это D по Balthazar)
+  // НО перипанкреатическая инфильтрация с жидкостью — тоже не всегда +2
+  // Balthazar C с инфильтрацией — ext=no. D/E — ext уже в ctg.
+  // +2 за ext только если: выпот в полостях, тромбоз сосудов, псевдоаневризма
+  var extTrue = [
+    'выпот в плевр','плеврит','асцит','тромбоз','псевдоаневризм',
+    'жидкость в плевральн','левостороннего выпота','правостороннего выпота',
+    'двустороннего выпота'
+  ].some(function(k){return t.indexOf(k)>=0;});
+  if(extTrue){
+    d.ext='yes'; filled.push('Внепанкр. осложнения: есть (+2 б)');
+  } else {
+    d.ext='no';
+    if(hasExt) warnings.push('Выпот/жидкость в описании — уточните: внепанкреатические осложнения?');
+    filled.push('Внепанкр. осложнения: нет');
+  }
+
+  // ── 4. ПЛЕВРИТ (BISAP +1) ─────────────────────
+  var hasPleural = /плеврит|плевральный выпот|жидкость в плевр|гидроторакс/i.test(text);
+  if(hasPleural){
+    d.ple='yes'; filled.push('Плеврит: есть → +1 балл BISAP');
+  } else {
+    d.ple='no'; filled.push('Плеврит: не описан');
+  }
+
+  // ── 5. ПСЕВДОКИСТА / ВИРСУНГ (информативно) ──
+  var hasPseudo = /псевдокист/i.test(text);
+  var hasWirsung = /вирсунг|вирсунгоэктази|расширен\s*\w*\s*проток|проток\s*\w*\s*расширен/i.test(text);
+  if(hasPseudo) warnings.push('ℹ Псевдокиста — учтите при выборе тактики дренирования');
+  if(hasWirsung) warnings.push('ℹ Вирсунгоэктазия — риск стриктуры протока');
+
+  // ── ПРИМЕНЯЕМ ─────────────────────────────────
+  DB.saveCurrent(); R();
+
+  var msg = '✅ Из КТ-заключения заполнено:\n• '+filled.join('\n• ');
+  if(warnings.length) msg += '\n\n⚠️ Обратите внимание:\n• '+warnings.join('\n• ');
+
+  // Рассчитываем итог
+  var ctgN=parseInt(d.ctg)||0;
+  var necN={none:0,lt30:2,'30to50':4,gt50:6}[d.nec]||0;
+  var extN=d.ext==='yes'?2:0;
+  msg += '\n\nmCTSI = '+ctgN+' + '+necN+' + '+extN+' = '+(ctgN+necN+extN)+' / 10';
+  if(d.ple==='yes') msg += '\nПлеврит → BISAP пересчитан';
+
+  alert(msg);
+  // Переключить на вкладку КЩС/КТ для проверки
+  goto(STEPS.findIndex(function(s){return s.id==='gas';}));
+}
+
 function importXLSX(){
   var inp = document.createElement('input');
   inp.type='file'; inp.accept='.xlsx,.xls';
@@ -251,143 +668,107 @@ function importXLSX(){
     var f = inp.files[0]; if(!f) return;
     var r = new FileReader();
     r.onload = function(e){
-      try{
-        // Динамически подгружаем SheetJS если ещё не загружен
-        function parseXLSX(ab){
-          var XLSX = window.XLSX;
-          var wb = XLSX.read(new Uint8Array(ab), {type:'array'});
-          var ws = wb.Sheets[wb.SheetNames[0]];
-          var rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
-
-          // ── Маппинг названий из ЕМИАЦ → поля Pancrea-Score ──────────────
-          var MAP = {
-            // Биохимия
-            'мочевина':           {tp:'24h', f:'urea'},
-            'креатинин':          {tp:'24h', f:'creat'},
-            'глюкоза':            {tp:'24h', f:'gluc'},
-            'аланинаминотрансфераза': {tp:'24h', f:'alt_val'},  // для Ranson
-            'аспартатаминотрансфераза': {tp:'24h', f:'ast'},
-            'альфа-амилаза':      {tp:'24h', f:'amylase_lab'}, // диагностика
-            'амилаза':            {tp:'24h', f:'amylase_lab'},
-            'с реактивный белок': {tp:'24h', f:'crp'},
-            'с-реактивный белок': {tp:'24h', f:'crp'},
-            'crp':                {tp:'24h', f:'crp'},
-            'билирубин общий':    {tp:'24h', f:'bili'},
-            'билирубин':          {tp:'24h', f:'bili'},
-            'альбумин':           {tp:'24h', f:'alb'},
-            'общий белок':        {tp:'24h', f:'tp'},
-            'лдг':                {tp:'24h', f:'ldh'},
-            'лактатдегидрогеназа':{tp:'24h', f:'ldh'},
-            'кальций':            {tp:'24h', f:'ca'},
-            'калий':              {tp:'24h', f:'k'},
-            'натрий':             {tp:'24h', f:'na'},
-            // ОАК
-            'лейкоциты':          {tp:'24h', f:'wbc'},
-            'гемоглобин общий':   {tp:'24h', f:'hb'},
-            'гемоглобин':         {tp:'24h', f:'hb'},
-            'расчетный гематокрит': {tp:'24h', f:'hct'},
-            'гематокрит':         {tp:'24h', f:'hct'},
-            'тромбоциты':         {tp:'24h', f:'plt'},
-            // Коагулограмма
-            'международное нормализованное отношение': {tp:'24h', f:'inr'},
-            'мно':                {tp:'24h', f:'inr'},
-            'фибриноген':         {tp:'24h', f:'fibr'},
-            'активированное частичное тромбопластиновое': {tp:'24h', f:'aptt'},
-          };
-
-          var found = {};
-          var patName = '', patDob = '', patSex = '';
-          var currentDate = '';
-
-          rows.forEach(function(row){
-            var cellA = String(row[0]||'').trim();
-            var cellB = String(row[1]||'').replace(',','.').trim();
-
-            // Ищем имя пациента
-            if(!patName && cellA.match(/^[А-ЯЁ]+\s+[А-ЯЁ]+\s+[А-ЯЁ]+\s*№/)){
-              patName = cellA.replace(/№ИБ.*$/i,'').replace(/№.*$/,'').trim();
-            }
-            // Пол и возраст
-            if(!patSex && cellA.toLowerCase().includes('пол:')) {
-              patSex = cellA.toLowerCase().includes('мужской') ? 'm' : 'f';
-              var ageM = cellA.match(/\((\d+)\s*лет/);
-              if(ageM) window._xlsxAge = ageM[1];
-              var dobM = cellA.match(/(\d{2}\.\d{2}\.\d{4})/);
-              if(dobM) patDob = dobM[1];
-            }
-            // Дата взятия
-            if(cellA.toLowerCase().includes('дата взятия')) {
-              var dm = cellA.match(/(\d{2}\.\d{2}\.\d{4})/);
-              if(dm) currentDate = dm[1];
-            }
-
-            // Ищем лабораторные показатели
-            var nameLow = cellA.toLowerCase();
-            Object.keys(MAP).forEach(function(key){
-              if(nameLow.indexOf(key) === 0 || nameLow.startsWith(key)){
-                var val = parseFloat(cellB);
-                if(!isNaN(val) && !found[key]){
-                  found[MAP[key].f] = {val: val, date: currentDate};
-                }
-              }
-            });
-          });
-
-          // ── Применяем найденные данные ────────────────────────────────
-          var filled = 0;
-
-          // Имя пациента
-          if(patName && !ST.pat.initials){
-            ST.pat.initials = patName;
-            filled++;
-          }
-          if(patSex && !ST.pat.sex){ ST.pat.sex = patSex; filled++; }
-          if(window._xlsxAge && !ST.pat.age){ ST.pat.age = window._xlsxAge; filled++; }
-
-          // Амилаза — в диагностику
-          if(found['amylase_lab'] && !ST.diag.amylase){
-            ST.diag.amylase = String(found['amylase_lab'].val);
-            filled++;
-          }
-
-          // Лабораторные данные → точка 24h
-          var labMap = {
-            urea:'urea', creat:'creat', gluc:'gluc', ast:'ast',
-            crp:'crp', bili:'bili', alb:'alb', tp:'tp', ldh:'ldh',
-            ca:'ca', k:'k', na:'na', wbc:'wbc', hb:'hb', hct:'hct', plt:'plt'
-          };
-          var d = D('24h');
-          Object.keys(labMap).forEach(function(src){
-            if(found[src] !== undefined && !d[labMap[src]]){
-              d[labMap[src]] = String(found[src].val);
-              filled++;
-            }
-          });
-
-          if(filled > 0){
-            DB.saveCurrent();
-            R();
-            alert('✅ Загружено из ЕМИАЦ: ' + filled + ' показателей.\n\nПроверьте данные на шаге «Лаборатория».');
-          } else {
-            alert('⚠️ Данные не распознаны.\nУбедитесь, что файл — это выгрузка лабораторных результатов из ЕМИАЦ.');
-          }
-        }
-
-        if(window.XLSX){
-          parseXLSX(e.target.result);
-        } else {
-          // Подгружаем SheetJS динамически
-          var s = document.createElement('script');
-          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-          s.onload = function(){ parseXLSX(e.target.result); };
-          s.onerror = function(){ alert('Нет интернета для загрузки библиотеки XLSX.\nСкопируйте файл на компьютер с интернетом или попросите IT включить локальный режим.'); };
-          document.head.appendChild(s);
-        }
-      }catch(err){ alert('Ошибка чтения файла: '+err.message); }
+      _xlsxParser.parse(e.target.result).then(function(rows){
+        applyEMIACRows(rows);
+      }).catch(function(err){
+        alert('Ошибка чтения XLSX: '+err);
+      });
     };
     r.readAsArrayBuffer(f);
   };
   inp.click();
+}
+
+function applyEMIACRows(rows){
+  // Маппинг: начало названия (lowercase) → поле Pancrea-Score
+  var MAP = [
+    {key:'мочевина',               f:'urea'},
+    {key:'креатинин',              f:'creat'},
+    {key:'глюкоза',                f:'gluc'},
+    {key:'аспартатаминотрансфераза',f:'ast'},
+    {key:'с реактивный белок',     f:'crp'},
+    {key:'с-реактивный белок',     f:'crp'},
+    {key:'билирубин',              f:'bili'},
+    {key:'альбумин',               f:'alb'},
+    {key:'общий белок',            f:'tp'},
+    {key:'лактатдегидрогеназа',    f:'ldh'},
+    {key:'кальций',                f:'ca'},
+    {key:'калий',                  f:'k'},
+    {key:'натрий',                 f:'na'},
+    {key:'лейкоциты',              f:'wbc'},
+    {key:'гемоглобин общий',       f:'hb'},
+    {key:'гемоглобин',             f:'hb'},
+    {key:'расчетный гематокрит',   f:'hct'},
+    {key:'гематокрит',             f:'hct'},
+    {key:'тромбоциты',             f:'plt'},
+    {key:'международное нормализованное отношение', f:'inr'},
+    {key:'фибриноген',             f:'fibr'},
+    {key:'активированное частичное тромбопластиновое', f:'aptt'},
+    {key:'альфа-амилаза',          f:'amylase_lab'},
+    {key:'аланинаминотрансфераза', f:'alt_val'},
+  ];
+
+  var found = {}, patName='', patSex='', patAge='';
+
+  rows.forEach(function(row){
+    // Все значения из всех столбцов этой строки
+    var vals = Object.values(row);
+    vals.forEach(function(cellA){
+      if(typeof cellA !== 'string') return;
+      var ca = cellA.trim();
+      var caLow = ca.toLowerCase();
+
+      // ФИО — строка вида "ФАМИЛИЯ ИМЯ ОТЧЕСТВО №ИБ..."
+      if(!patName && /^[А-ЯЁ]{2,}\s+[А-ЯЁ]{2,}\s+[А-ЯЁ]{2,}/.test(ca)){
+        patName = ca.replace(/№.*$/,'').replace(/\s+/g,' ').trim();
+      }
+      // Пол и возраст
+      if(!patSex && caLow.includes('пол:')){
+        patSex = caLow.includes('мужской')?'m':'f';
+        var am = ca.match(/\((\d+)\s*лет/); if(am) patAge=am[1];
+      }
+    });
+
+    // Ищем название показателя в столбце A, значение в B или C
+    var nameCell = (row['A']||'').trim().toLowerCase();
+    var valCell  = (row['B']||row['C']||'').replace(',','.').trim();
+    var numVal   = parseFloat(valCell);
+
+    if(!isNaN(numVal)){
+      MAP.forEach(function(m){
+        if(nameCell.indexOf(m.key)===0 && found[m.f]===undefined){
+          found[m.f] = numVal;
+        }
+      });
+      // Амилаза — отдельно в диагностику
+      if(nameCell.indexOf('альфа-амилаза')===0 && found['amylase_diag']===undefined){
+        found['amylase_diag'] = numVal;
+      }
+    }
+  });
+
+  var filled = 0;
+  if(patName && !ST.pat.initials){ ST.pat.initials=patName; filled++; }
+  if(patSex  && !ST.pat.sex)     { ST.pat.sex=patSex;       filled++; }
+  if(patAge  && !ST.pat.age)     { ST.pat.age=patAge;        filled++; }
+  if(found['amylase_diag'] && !ST.diag.amylase){
+    ST.diag.amylase = String(found['amylase_diag']); filled++;
+  }
+
+  var labFields = ['urea','creat','gluc','ast','crp','bili','alb','tp','ldh','ca','k','na','wbc','hb','hct','plt'];
+  var d = D('24h');
+  labFields.forEach(function(fld){
+    if(found[fld]!==undefined && !d[fld]){
+      d[fld]=String(found[fld]); filled++;
+    }
+  });
+
+  if(filled>0){
+    DB.saveCurrent(); R();
+    alert('✅ Загружено из ЕМИАЦ: '+filled+' показателей.\n\nПроверьте данные на шаге «Анализы».');
+  } else {
+    alert('⚠️ Данные не распознаны.\nУбедитесь, что файл — выгрузка лабораторных результатов из ЕМИАЦ.');
+  }
 }
 
 function importFile(){
@@ -550,8 +931,8 @@ function buildHome(){
       '<td style="padding:6px;text-align:center;white-space:nowrap;border:1px solid var(--bd)">'+
         '<button onclick="event.stopPropagation();exportLink(\''+p.id+'\')" title="Скопировать ссылку для коллеги" '+
           'style="background:none;border:1px solid var(--c)55;border-radius:5px;color:var(--c);padding:3px 9px;cursor:pointer;font-size:11px;margin:1px;font-weight:600">🔗 Поделиться</button>'+
-        '<button onclick="event.stopPropagation();exportFile(\''+p.id+'\')" title="Скачать файл резервной копии" '+
-          'style="background:none;border:1px solid var(--bd);border-radius:5px;color:var(--t3);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px" title="Резервная копия">💾</button>'+
+        '<button onclick="event.stopPropagation();exportFile(\''+p.id+'\')" title="Сохранить на диск (для повторного открытия)" '+
+          'style="background:none;border:1px solid var(--g)66;border-radius:5px;color:var(--g);padding:3px 8px;cursor:pointer;font-size:11px;margin:1px;font-weight:600">💾 Диск</button>'+
         '<button onclick="event.stopPropagation();if(confirm(\'Удалить пациента?\')){ DB.del(\''+p.id+'\');renderHome(); }" '+
           'style="background:none;border:1px solid #ef434355;border-radius:5px;color:var(--r);padding:3px 6px;cursor:pointer;font-size:11px;margin:1px">✕</button>'+
       '</td>'+
@@ -615,7 +996,7 @@ function buildHome(){
         '+ Новый пациент</button>'+
       '<button onclick="importFile()" '+
         'style="padding:10px 12px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit">'+
-        '📂 Открыть по ссылке / файлу</button>'+
+        '📂 Открыть пациента / ссылку</button>'+
       '<button onclick="importXLSX()" '+
         'style="padding:10px 12px;background:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit">'+
         '📊 Загрузить из ЕМИАЦ</button>'+
@@ -655,8 +1036,8 @@ function buildHome(){
   )+
 
   '<div style="text-align:center;font-size:11px;color:var(--t3);padding:12px 0 4px">'+
-    '💾 Данные хранятся в этом браузере (до 50 пациентов) · '+
-    '🔗 «Поделиться» — отправить ссылку коллеге · при открытии данные загрузятся автоматически'+
+    '💾 Сохраните пациента на диск (кнопка «Диск») — чтобы открыть через 48/72/96ч · '+
+    '📂 «Открыть пациента» — загрузить сохранённый .json · 🔗 «Поделиться» — ссылка коллеге'
   '</div>'+
   (total>0?
     '<div style="text-align:center;padding-bottom:20px">'+
@@ -719,7 +1100,7 @@ var DDEF={
   ph:'',pao2:'',fio2:'0.21',
   ctg:'0',nec:'none',ext:'no',ple:'no',arf:'no',
   dzh_peritoneal:'no',dzh_enceph:'no',dzh_ecg:'no',dzh_exudate:'no',
-  dzh_parapanc:'no',dzh_steatonec:'no',dzh_nofluid:'no'
+  dzh_parapanc:'no',dzh_steatonec:'no',dzh_nofluid:'no',dzh_oligo250:'no'
 };
 
 function D(tp){ if(!ST.data[tp]||ST.data[tp].temp===undefined){ST.data[tp]=JSON.parse(JSON.stringify(DDEF));} return ST.data[tp]; }
@@ -918,7 +1299,13 @@ function calcDzhanelidge(tp){
   var sbp=pf(d.sbp), uo=pf(d.uo), wbc=pf(d.wbc), gluc=pf(d.gluc), urea=pf(d.urea), hb=pf(d.hb);
 
   crit.push({lbl:'Перитонеальные симптомы',       auto:false, val:d.dzh_peritoneal==='yes'});
-  crit.push({lbl:'Олигурия <250 мл/12ч',          auto:true,  val:uo!==null&&uo<500, hint:uo?uo+' мл/сут':'нет данных'});
+  // Олигурия — ОДИН критерий:
+  // Классический Джанелидзе: <250 мл/12ч = <500 мл/сут
+  // Дополнительный балл пользователя: <250 мл/сут (ручной чекбокс dzh_oligo250)
+  // Итого: если uo<500 → +1; если uo<250 ИЛИ чекбокс → ещё +1
+  var uoHint = uo ? uo+' мл/сут' : (d.dzh_oligo250==='yes'?'указано вручную':'нет данных');
+  crit.push({lbl:'Олигурия <250 мл/12ч (<500 мл/сут)',   auto:true, val:(uo!==null&&uo<500), hint:uoHint});
+  crit.push({lbl:'Диурез <250 мл/сут (анурия / тяж. олигурия)', auto:true, val:(uo!==null&&uo<250)||(d.dzh_oligo250==='yes'), hint:uoHint});
   crit.push({lbl:'АД сист. <100 мм рт.ст.',       auto:true,  val:sbp!==null&&sbp<100, hint:sbp?sbp+' мм рт.ст.':'нет данных'});
   crit.push({lbl:'Энцефалопатия',                 auto:false, val:d.dzh_enceph==='yes'});
   crit.push({lbl:'Hb >160 г/л',                   auto:true,  val:hb!==null&&hb>160, hint:hb?hb+' г/л':'нет данных'});
@@ -1016,6 +1403,15 @@ function updateHints(){
   function upd(id,html){ var el=document.getElementById(id); if(el)el.innerHTML=html; }
 
   if(sbp&&dbp){upd('hint_map','MAP = ('+d.sbp+' + 2×'+d.dbp+') / 3 = <b style="color:var(--c)">'+(((sbp+2*dbp)/3)|0)+' мм рт.ст.</b>');}
+  var uo_v=pf(d.uo);
+  if(uo_v!==null){
+    var uoMsg='';
+    if(uo_v<250) uoMsg='<b style="color:var(--r)">⚠ Анурия / тяжёлая олигурия (&lt;250 мл/сут) → +1 балл шкала Джанелидзе (&lt;250 мл/12ч) · SOFA почки ≥3 · APACHE II ≥3</b>';
+    else if(uo_v<500) uoMsg='<b style="color:var(--y)">⚠ Олигурия (&lt;500 мл/сут = &lt;250 мл/12ч) → +1 балл шкала Джанелидзе · SOFA почки 3</b>';
+    else if(uo_v<800) uoMsg='<span style="color:var(--y)">Сниженный диурез (500–800 мл/сут) — наблюдение</span>';
+    else uoMsg='<span style="color:var(--g)">Диурез в норме (&gt;800 мл/сут)</span>';
+    upd('hint_uo', uo_v+' мл/сут → '+uoMsg);
+  }
   if(urea){ var bun=urea2bun(urea); upd('hint_urea',urea.toFixed(1)+' ммоль/л = BUN '+bun.toFixed(1)+' мг/дл'+(urea>8.93?' <b style="color:var(--r)">⚠ BISAP >25 мг/дл</b>':'')); }
   if(creat){ var cr=cr2mgdl(creat); upd('hint_creat',creat+' мкмоль/л = '+cr.toFixed(2)+' мг/дл'+(creat>=309?' <b style="color:var(--r)">SOFA 4</b>':creat>=221?' <b style="color:var(--y)">SOFA 3</b>':creat>=177?' SOFA 2':creat>=106?' SOFA 1':'')); }
   if(bili){ var bi=bi2mgdl(bili); upd('hint_bili',bili+' мкмоль/л = '+bi.toFixed(2)+' мг/дл'+(bili>=205?' <b style="color:var(--r)">SOFA 4</b>':bili>=102?' <b style="color:var(--y)">SOFA 3</b>':bili>=34?' SOFA 2':bili>=20?' SOFA 1':'')); }
@@ -1268,6 +1664,16 @@ function pageVitals(){
         dInp('АД диаст.',tp,'dbp','мм рт.ст.')+
         dInp('Диурез',tp,'uo','мл/сут')+
       '</div>'+
+      '<div id="hint_uo" class="ib" style="margin-top:6px"></div>'+
+      '<div style="margin-top:8px;padding:8px 12px;background:var(--bg3);border-radius:8px;border:1px solid var(--bd)">'+
+        '<div style="font-size:11px;color:var(--t3);margin-bottom:6px;font-weight:600">ОЛИГУРИЯ — ручное указание (если точный объём неизвестен):</div>'+
+        '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">'+
+          '<input type="checkbox" '+(D(tp).dzh_oligo250==='yes'?'checked':'')+
+          ' onchange="sD(\''+tp+'\',\'dzh_oligo250\',this.checked?\'yes\':\'no\');onBlur()" style="width:16px;height:16px;cursor:pointer">'+
+          '<span>Диурез &lt;250 мл/сут — тяжёлая олигурия / анурия</span>'+
+          '<span style="font-size:11px;color:var(--r);font-weight:700">+1 балл Джанелидзе</span>'+
+        '</label>'+
+      '</div>'+
       '<div id="hint_map" class="ib" style="margin-top:9px">'+
         (mapV?'MAP = ('+d.sbp+' + 2×'+d.dbp+') / 3 = <b style="color:var(--c)">'+mapV+' мм рт.ст.</b>':'Введите АД сист. и диаст. для расчёта MAP')+
       '</div>'+
@@ -1336,15 +1742,30 @@ function pageVitals(){
   // Шкала Джанелидзе — клинические признаки
   (function(){
     var d2=D(tp);
-    var keys=['dzh_peritoneal','dzh_enceph','dzh_ecg','dzh_exudate','dzh_parapanc','dzh_steatonec','dzh_nofluid'];
+    var keys=['dzh_peritoneal','dzh_enceph','dzh_ecg','dzh_exudate','dzh_parapanc','dzh_steatonec','dzh_nofluid','dzh_oligo250'];
     var lbls=['Перитонеальные симптомы','Энцефалопатия','Метаболич. изменения на ЭКГ',
               'Вишнёвый/коричнево-чёрный экссудат (лапаро-я)','Распространённый парапанкреатит (за сальниковую сумку)',
-              'Стеатонекрозы','Нет эффекта от инфузионной терапии'];
+              'Стеатонекрозы','Нет эффекта от инфузионной терапии',
+              'Диурез <250 мл/сут (олигурия / анурия)'];
+    var hints=['','','','','','','',
+      (function(){ var uo=pf(D(tp).uo); return uo!==null ? (uo<250?'⚠ Авто: '+uo+' мл/сут <250':uo<500?'⚠ Авто: '+uo+' мл/сут ('+uo+'<500)':'Авто: '+uo+' мл/сут ≥250') : ''; })()
+    ];
     var items=keys.map(function(k,i){
-      var on=d2[k]==='yes';
-      return '<div class="crit'+(on?' on':'')+'" onclick="sDR(\''+tp+'\',\''+k+'\','+(on?'\'no\'':'\'yes\'')+')">'+
-        '<div class="cbox">'+(on?'<span style="font-size:13px;color:#000">✓</span>':'')+'</div>'+
-        '<div><div class="ctit" style="font-size:13px">'+lbls[i]+'</div></div>'+
+      // Для олигурии <250 — проверяем авто из поля диуреза
+      var autoOn = false;
+      if(k==='dzh_oligo250'){ var uo_v=pf(d2.uo); autoOn=(uo_v!==null&&uo_v<250); }
+      var on = d2[k]==='yes' || autoOn;
+      var isAuto = autoOn && d2[k]!=='yes';
+      // При авто-включении клик не переключает
+      var clickHandler = isAuto ? '' : 'sDR(\''+tp+'\',\''+k+'\','+(on && !autoOn ? '\'no\'' : '\'yes\'')+')';
+      return '<div class="crit'+(on?' on':'')+'" '+(clickHandler?'onclick="'+clickHandler+'"':'')+'>'+
+        '<div class="cbox">'+(on?'<span style="font-size:13px;color:#000">'+(isAuto?'⚡':'✓')+'</span>':'')+'</div>'+
+        '<div>'+
+          '<div class="ctit" style="font-size:13px">'+lbls[i]+
+            (k==='dzh_oligo250'?' <span style="font-size:11px;color:var(--r);font-weight:700">→ +1 балл</span>':'')+
+          '</div>'+
+          (hints[i]?'<div style="font-size:11px;color:'+(on?'var(--r)':'var(--t3)')+';margin-top:2px">'+hints[i]+'</div>':'')+
+        '</div>'+
       '</div>';
     }).join('');
     return '<div class="card">'+
@@ -1479,6 +1900,22 @@ function pageGas(){
   '<div class="card">'+
     '<div class="ch"><span>🖥️</span><span class="ct">КТ — mCTSI (Balthazar)</span></div>'+
     '<div class="cb">'+
+      '<div style="margin-bottom:10px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;overflow:hidden">'+
+        '<div style="padding:10px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid #a5d6a7">'+
+          '<span style="font-size:13px;color:#2e7d32;font-weight:700;flex:1">📄 Вставьте или загрузите КТ-заключение</span>'+
+          '<button onclick="importCTWord()" style="padding:6px 12px;background:#2e7d32;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit">'+
+            '📎 Загрузить .docx</button>'+
+        '</div>'+
+        '<div style="padding:10px 14px">'+
+          '<textarea id="ct_text_input" rows="5" placeholder="Вставьте текст КТ-заключения сюда (Ctrl+V) — например: КТ-признаки панкреатита (по Balthazar ст C), некроз 40%, левосторонний плеврит..." '+
+            'style="width:100%;box-sizing:border-box;font-size:12px;font-family:inherit;border:1px solid #a5d6a7;border-radius:6px;padding:8px;background:#fff;color:#333;resize:vertical;line-height:1.5" '+
+            'oninput="this.style.borderColor=this.value.trim()?\'#2e7d32\':\'#a5d6a7\'"></textarea>'+
+          '<button onclick="var txt=document.getElementById(\'ct_text_input\').value.trim();if(txt)applyCTText(txt);else alert(\'Введите текст заключения\')" '+
+            'style="margin-top:7px;padding:7px 18px;background:#2e7d32;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">'+
+            '✅ Применить текст заключения</button>'+
+          '<span style="font-size:11px;color:#388e3c;margin-left:10px">Balthazar, некроз, плеврит → заполнятся автоматически</span>'+
+        '</div>'+
+      '</div>'+
       '<div class="al al-i">Оптимальное время: КТ с контрастом через 48–72 ч или при клиническом ухудшении</div>'+
       '<div style="margin-bottom:11px">'+dSel('КТ-степень (Balthazar A–E)',tp,'ctg',[
         ['0','A — Норма (0 б)'],['1','B — Увеличение ПЖ (1 б)'],
@@ -2220,8 +2657,24 @@ function pageReport(){
   '</div>'+
   '<div class="btnrow" style="margin-top:0;padding-top:0">'+
     '<button class="btn btn-s" onclick="goHome()">👥 Список пациентов</button>'+
-    '<button class="btn btn-s" onclick="startNew()" style="margin-left:8px">+ Новый пациент</button>'+
-    '<button class="btn btn-s" onclick="exportFile(null)" style="margin-left:8px">📤 Экспорт</button>'+
+    '<button class="btn btn-s" onclick="startNew()">+ Новый пациент</button>'+
+  '</div>'+
+  '<div style="margin:4px 0 18px;padding:14px 16px;background:#e8f5e9;border:2px solid #a5d6a7;border-radius:10px">'+
+    '<div style="font-weight:700;color:#2e7d32;margin-bottom:8px;font-size:14px">💾 Сохранение данных пациента</div>'+
+    '<div style="font-size:13px;color:#1b5e20;margin-bottom:10px">'+
+      'Сохраните файл на диск — чтобы открыть пациента через 48 / 72 / 96 ч или перенести на другой компьютер'+
+    '</div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+      '<button onclick="saveCurrentToDisk()" '+
+        'style="padding:10px 20px;background:#2e7d32;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">'+
+        '💾 Сохранить этого пациента на диск</button>'+
+      '<button onclick="exportAllFile()" '+
+        'style="padding:10px 16px;background:#fff;color:#2e7d32;border:2px solid #a5d6a7;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit">'+
+        '📦 Сохранить всех пациентов</button>'+
+    '</div>'+
+    '<div style="font-size:11px;color:#388e3c;margin-top:8px">'+
+      'При повторном открытии нажмите «📂 Открыть по ссылке / файлу» и выберите сохранённый .json файл'+
+    '</div>'+
   '</div>'+
   '</div>';
 }
@@ -2239,11 +2692,13 @@ function tpTabs(){
   '</div>';
 }
 function nav2(lb,nb){
-  // nb может быть строкой-HTML или текстом
   var nbHtml=nb.indexOf('<button')>=0?nb:'<button class="btn btn-p" onclick="next()">'+nb+'</button>';
+  var saveName = ST.pat&&ST.pat.initials ? ST.pat.initials.split(' ')[0] : '';
+  var saveLabel = saveName ? '💾 Сохранить ('+saveName+')' : '💾 Сохранить на диск';
   return '<div class="btnrow">'+
     '<button class="btn btn-s" onclick="back()">'+lb+'</button>'+
     nbHtml+
+    '<button class="btn btn-s" onclick="saveCurrentToDisk()" title="Сохранить JSON-файл пациента на диск для повторного открытия" style="margin-left:auto;border-color:var(--g)55;color:var(--g)">'+saveLabel+'</button>'+
   '</div>';
 }
 
