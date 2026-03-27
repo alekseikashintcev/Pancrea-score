@@ -386,23 +386,31 @@ var _xlsxParser = (function(){
   // Парсить sheet1 и вернуть массив строк [{col,row,type,val}]
   function parseSheet(xml, strings){
     var rows = {};
-    var re = /<c\s+r="([A-Z]+)(\d+)"(?:[^>]*\st="([^"]*)")?[^>]*>(?:[^<]*<v>([^<]*)<\/v>)?/g;
+    // Ищем каждую ячейку: атрибут t= может быть в любом месте тега
+    // Формат: <c r="COL+ROW" ... t="s" ...><v>INDEX</v></c>
+    var cellRe = /<c ([^>]*)>([\s\S]*?)<\/c>/g;
     var m;
-    while((m=re.exec(xml))!==null){
-      var col=m[1], row=parseInt(m[2]), type=m[3]||'', val=m[4]||'';
-      if(!rows[row]) rows[row]=[];
-      var realVal = (type==='s'&&strings)?strings[parseInt(val)]||'':val;
-      rows[row].push({col:col,val:realVal});
+    while((m=cellRe.exec(xml))!==null){
+      var attrs = m[1], inner = m[2];
+      // Колонка и строка
+      var rc = attrs.match(/r="([A-Z]+)(\d+)"/);
+      if(!rc) continue;
+      var col = rc[1], row = parseInt(rc[2]);
+      // Тип (t="s" = shared string)
+      var typeM = (function(a){ var i=a.indexOf(' t="'); return i>=0?[null,a.substring(i+4,a.indexOf('"',i+4))]:null; })(attrs);
+      var type = typeM ? typeM[1] : '';
+      // Значение <v>...</v>
+      var valM = inner.match(/<v>([^<]*)<\/v>/);
+      if(!valM) continue;
+      var val = valM[1];
+      var realVal = (type==='s' && strings) ? (strings[parseInt(val)] || '') : val;
+      // Очистка
+      realVal = realVal.replace(/\r\n/g,' ').replace(/\n/g,' ').trim();
+      if(!rows[row]) rows[row] = {};
+      rows[row][col] = realVal;
     }
-    // Перевести в массив строк (массив массивов значений по столбцам A..H)
-    var result=[];
-    var maxRow=Math.max.apply(null,Object.keys(rows).map(Number));
-    for(var r=1;r<=maxRow;r++){
-      var cells=rows[r]||[];
-      var row2={};
-      cells.forEach(function(c){row2[c.col]=c.val;});
-      result.push(row2);
-    }
+    var result=[], maxRow=Object.keys(rows).length ? Math.max.apply(null,Object.keys(rows).map(Number)) : 0;
+    for(var r=1;r<=maxRow;r++) result.push(rows[r]||{});
     return result;
   }
 
@@ -885,146 +893,7 @@ function importFile(){
   };
   inp.click();
 }
-// Читает sharedStrings + sheet1 напрямую из ZIP
-// ═══════════════════════════════════════════════
-var _xlsxParser = (function(){
-  // Минимальный ZIP-читатель (без декомпрессии deflate — используем нативный браузер)
-  function readZip(ab){
-    // Ищем файлы через Central Directory в конце ZIP
-    var dv = new DataView(ab);
-    var u8 = new Uint8Array(ab);
-    var len = u8.length;
-    // Найти End of Central Directory (сигнатура 0x06054b50)
-    var eocd = -1;
-    for(var i=len-22;i>=Math.max(0,len-65536);i--){
-      if(dv.getUint32(i,true)===0x06054b50){eocd=i;break;}
-    }
-    if(eocd<0) return null;
-    var cdOffset = dv.getUint32(eocd+16,true);
-    var cdCount  = dv.getUint16(eocd+8,true);
-    var files = {};
-    var pos = cdOffset;
-    for(var f=0;f<cdCount;f++){
-      if(dv.getUint32(pos,true)!==0x02014b50) break;
-      var cmethod  = dv.getUint16(pos+10,true);
-      var csize    = dv.getUint32(pos+20,true);
-      var usize    = dv.getUint32(pos+24,true);
-      var fnLen    = dv.getUint16(pos+28,true);
-      var extraLen = dv.getUint16(pos+30,true);
-      var cmtLen   = dv.getUint16(pos+32,true);
-      var lhOffset = dv.getUint32(pos+42,true);
-      var fname = '';
-      for(var c=0;c<fnLen;c++) fname += String.fromCharCode(u8[pos+46+c]);
-      files[fname] = {method:cmethod, csize:csize, usize:usize, lhOffset:lhOffset};
-      pos += 46 + fnLen + extraLen + cmtLen;
-    }
-    // Извлечь данные файла по Local File Header
-    function extract(fname){
-      var e = files[fname]; if(!e) return null;
-      var lh = e.lhOffset;
-      if(dv.getUint32(lh,true)!==0x04034b50) return null;
-      var fnl = dv.getUint16(lh+26,true);
-      var exl = dv.getUint16(lh+28,true);
-      var dataStart = lh+30+fnl+exl;
-      var slice = u8.slice(dataStart, dataStart+e.csize);
-      if(e.method===0) return slice; // stored
-      if(e.method===8){
-        // deflate — используем DecompressionStream если доступен
-        try{
-          // Синхронного API нет — возвращаем promise-like объект
-          return {deflated:slice, usize:e.usize};
-        }catch(ex){return null;}
-      }
-      return null;
-    }
-    return {files:files, extract:extract};
-  }
 
-  function u8toString(u8){
-    var s=''; for(var i=0;i<u8.length;i++) s+=String.fromCharCode(u8[i]); return s;
-  }
-
-  // Декодировать UTF-8 байты в строку
-  function utf8(u8){
-    try{ return new TextDecoder('utf-8').decode(u8); }
-    catch(e){ return u8toString(u8); }
-  }
-
-  // Распаковать deflate через DecompressionStream (Chrome 80+, Firefox 113+)
-  function inflateAsync(compressed){
-    return new Response(
-      new Blob([compressed]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
-    ).arrayBuffer().then(function(ab){ return new Uint8Array(ab); });
-  }
-
-  // Извлечь текст из XML (sharedStrings или sheet)
-  function extractTexts(xml){
-    var texts = [];
-    var re = /<t(?:\s[^>]*)?>([^<]*)<\/t>/g;
-    var m;
-    while((m=re.exec(xml))!==null){
-      texts.push(m[1]
-        .replace(/&amp;/g,'&')
-        .replace(/&lt;/g,'<')
-        .replace(/&gt;/g,'>')
-        .replace(/&quot;/g,'"')
-        .replace(/&#x([0-9a-fA-F]+);/g,function(_,h){return String.fromCharCode(parseInt(h,16));})
-        .replace(/&#(\d+);/g,function(_,d){return String.fromCharCode(parseInt(d,10));})
-      );
-    }
-    return texts;
-  }
-
-  // Парсить sheet1 и вернуть массив строк [{col,row,type,val}]
-  function parseSheet(xml, strings){
-    var rows = {};
-    var re = /<c\s+r="([A-Z]+)(\d+)"(?:[^>]*\st="([^"]*)")?[^>]*>(?:[^<]*<v>([^<]*)<\/v>)?/g;
-    var m;
-    while((m=re.exec(xml))!==null){
-      var col=m[1], row=parseInt(m[2]), type=m[3]||'', val=m[4]||'';
-      if(!rows[row]) rows[row]=[];
-      var realVal = (type==='s'&&strings)?strings[parseInt(val)]||'':val;
-      rows[row].push({col:col,val:realVal});
-    }
-    // Перевести в массив строк (массив массивов значений по столбцам A..H)
-    var result=[];
-    var maxRow=Math.max.apply(null,Object.keys(rows).map(Number));
-    for(var r=1;r<=maxRow;r++){
-      var cells=rows[r]||[];
-      var row2={};
-      cells.forEach(function(c){row2[c.col]=c.val;});
-      result.push(row2);
-    }
-    return result;
-  }
-
-  // Главная функция — возвращает Promise<Array<Object>> (строки как {A,B,C,...})
-  function parse(arrayBuffer){
-    var zip = readZip(arrayBuffer);
-    if(!zip) return Promise.reject('Не удалось прочитать ZIP');
-
-    // Список файлов для извлечения
-    var needed = ['xl/sharedStrings.xml','xl/worksheets/sheet1.xml'];
-
-    function getFile(name){
-      var raw = zip.extract(name);
-      if(!raw) return Promise.resolve('');
-      if(raw.deflated){
-        return inflateAsync(raw.deflated).then(function(u8){return utf8(u8);});
-      }
-      return Promise.resolve(utf8(raw));
-    }
-
-    return Promise.all([getFile(needed[0]),getFile(needed[1])]).then(function(res){
-      var ssXml=res[0], shXml=res[1];
-      var strings = extractTexts(ssXml);
-      var rows = parseSheet(shXml, strings);
-      return rows;
-    });
-  }
-
-  return {parse:parse};
-})();
 
 // ═══════════════════════════════════════════════
 // ИМПОРТ XLSX ИЗ ЕМИАЦ
@@ -1253,115 +1122,7 @@ function applyCTText(text){
   goto(STEPS.findIndex(function(s){return s.id==='gas';}));
 }
 
-function importXLSX(){
-  var inp = document.createElement('input');
-  inp.type='file'; inp.accept='.xlsx,.xls';
-  inp.onchange = function(){
-    var f = inp.files[0]; if(!f) return;
-    var r = new FileReader();
-    r.onload = function(e){
-      _xlsxParser.parse(e.target.result).then(function(rows){
-        applyEMIACRows(rows);
-      }).catch(function(err){
-        alert('Ошибка чтения XLSX: '+err);
-      });
-    };
-    r.readAsArrayBuffer(f);
-  };
-  inp.click();
-}
 
-function applyEMIACRows(rows){
-  // Маппинг: начало названия (lowercase) → поле Pancrea-Score
-  var MAP = [
-    {key:'мочевина',               f:'urea'},
-    {key:'креатинин',              f:'creat'},
-    {key:'глюкоза',                f:'gluc'},
-    {key:'аспартатаминотрансфераза',f:'ast'},
-    {key:'с реактивный белок',     f:'crp'},
-    {key:'с-реактивный белок',     f:'crp'},
-    {key:'билирубин',              f:'bili'},
-    {key:'альбумин',               f:'alb'},
-    {key:'общий белок',            f:'tp'},
-    {key:'лактатдегидрогеназа',    f:'ldh'},
-    {key:'кальций',                f:'ca'},
-    {key:'калий',                  f:'k'},
-    {key:'натрий',                 f:'na'},
-    {key:'лейкоциты',              f:'wbc'},
-    {key:'гемоглобин общий',       f:'hb'},
-    {key:'гемоглобин',             f:'hb'},
-    {key:'расчетный гематокрит',   f:'hct'},
-    {key:'гематокрит',             f:'hct'},
-    {key:'тромбоциты',             f:'plt'},
-    {key:'международное нормализованное отношение', f:'inr'},
-    {key:'фибриноген',             f:'fibr'},
-    {key:'активированное частичное тромбопластиновое', f:'aptt'},
-    {key:'альфа-амилаза',          f:'amylase_lab'},
-    {key:'аланинаминотрансфераза', f:'alt_val'},
-  ];
-
-  var found = {}, patName='', patSex='', patAge='';
-
-  rows.forEach(function(row){
-    // Все значения из всех столбцов этой строки
-    var vals = Object.values(row);
-    vals.forEach(function(cellA){
-      if(typeof cellA !== 'string') return;
-      var ca = cellA.trim();
-      var caLow = ca.toLowerCase();
-
-      // ФИО — строка вида "ФАМИЛИЯ ИМЯ ОТЧЕСТВО №ИБ..."
-      if(!patName && /^[А-ЯЁ]{2,}\s+[А-ЯЁ]{2,}\s+[А-ЯЁ]{2,}/.test(ca)){
-        patName = ca.replace(/№.*$/,'').replace(/\s+/g,' ').trim();
-      }
-      // Пол и возраст
-      if(!patSex && caLow.includes('пол:')){
-        patSex = caLow.includes('мужской')?'m':'f';
-        var am = ca.match(/\((\d+)\s*лет/); if(am) patAge=am[1];
-      }
-    });
-
-    // Ищем название показателя в столбце A, значение в B или C
-    var nameCell = (row['A']||'').trim().toLowerCase();
-    var valCell  = (row['B']||row['C']||'').replace(',','.').trim();
-    var numVal   = parseFloat(valCell);
-
-    if(!isNaN(numVal)){
-      MAP.forEach(function(m){
-        if(nameCell.indexOf(m.key)===0 && found[m.f]===undefined){
-          found[m.f] = numVal;
-        }
-      });
-      // Амилаза — отдельно в диагностику
-      if(nameCell.indexOf('альфа-амилаза')===0 && found['amylase_diag']===undefined){
-        found['amylase_diag'] = numVal;
-      }
-    }
-  });
-
-  var filled = 0;
-  if(patName && !ST.pat.initials){ ST.pat.initials=patName; filled++; }
-  if(patSex  && !ST.pat.sex)     { ST.pat.sex=patSex;       filled++; }
-  if(patAge  && !ST.pat.age)     { ST.pat.age=patAge;        filled++; }
-  if(found['amylase_diag'] && !ST.diag.amylase){
-    ST.diag.amylase = String(found['amylase_diag']); filled++;
-  }
-
-  var labFields = ['urea','creat','gluc','ast','crp','bili','alb','tp','ldh','ca','k','na','wbc','hb','hct','plt'];
-  var d = D('24h');
-  labFields.forEach(function(fld){
-    if(found[fld]!==undefined && !d[fld]){
-      d[fld]=String(found[fld]); filled++;
-    }
-  });
-
-  if(filled>0){
-    DB.saveCurrent(); R();
-    alert('✅ Загружено из ЕМИАЦ: '+filled+' показателей.\n\nПроверьте данные на шаге «Анализы».');
-  } else {
-    alert('⚠️ Данные не распознаны.\nУбедитесь, что файл — выгрузка лабораторных результатов из ЕМИАЦ.');
-  }
-}
 
 function importFile(){
   var inp = document.createElement('input');
