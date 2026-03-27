@@ -174,6 +174,8 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
 // PANCREA-SCORE  ·  Система управления пациентами
 // ═══════════════════════════════════════════════════════════════
 var VIEW = 'home'; // 'home' | 'patient'
+var SELECTED_IDS = {}; // id -> true for checked patients
+var SELECTED_IDS = {}; // id -> true for checked patients
 
 // ── БАЗА ДАННЫХ (localStorage) ─────────────────────────────────
 var DB = {
@@ -251,9 +253,9 @@ function exportAllFile(){
   a.download = 'pancrea_все_пациенты_'+new Date().toISOString().slice(0,10)+'.json'; a.click();
 }
 
-function exportAllXLSX(){
-  var list = DB.load();
-  if(!list.length){ alert('Нет пациентов для выгрузки'); return; }
+// ── ВЫБОР ПАЦИЕНТОВ И ЭКСПОРТ ──────────────────────────────────────────
+
+function _buildAndDownloadCSV(list, filename){
 
   // ── Заголовки таблицы ────────────────────────────────────────────
   var etioMap={biliary:'ЖКБ',aliment:'Алиментарный',hypertg:'Гипертриглицеридемия',
@@ -363,13 +365,59 @@ function exportAllXLSX(){
   var blob = new Blob([csv],{type:'text/csv;charset=utf-8'});
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'pancrea_пациенты_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.download = filename;
   a.click();
   setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
 }
 
 
 // Загрузить пациента(ов) из JSON-файла на диске
+
+function exportAllXLSX(){
+  var list = DB.load();
+  if(!list.length){ alert('Нет пациентов для выгрузки'); return; }
+  _buildAndDownloadCSV(list, 'pancrea_пациенты_'+new Date().toISOString().slice(0,10)+'.csv');
+}
+
+function exportSelectedXLSX(){
+  var ids = Object.keys(SELECTED_IDS);
+  if(!ids.length){ alert('Никто не выбран'); return; }
+  var list = DB.load().filter(function(p){ return SELECTED_IDS[p.id]; });
+  _buildAndDownloadCSV(list, 'pancrea_выборка_'+new Date().toISOString().slice(0,10)+'.csv');
+}
+
+function updateSelBar(){
+  var ids = Object.keys(SELECTED_IDS);
+  var bar = document.getElementById('selBar');
+  var cnt = document.getElementById('selCount');
+  var chkAll = document.getElementById('chkAll');
+  if(bar){ bar.style.display = ids.length>0 ? 'flex' : 'none'; }
+  if(cnt){ cnt.textContent = 'Выбрано: '+ids.length; }
+  if(chkAll){
+    var list = DB.load();
+    chkAll.checked = list.length>0 && ids.length===list.length;
+    chkAll.indeterminate = ids.length>0 && ids.length<list.length;
+  }
+}
+
+function toggleSelectAll(){
+  var list = DB.load();
+  var allSelected = Object.keys(SELECTED_IDS).length === list.length;
+  SELECTED_IDS = {};
+  if(!allSelected) list.forEach(function(p){ SELECTED_IDS[p.id]=true; });
+  renderHome();
+}
+
+function deleteSelected(){
+  var ids = Object.keys(SELECTED_IDS);
+  if(!ids.length) return;
+  if(!confirm('Удалить '+ids.length+' пациент(ов)?')) return;
+  ids.forEach(function(id){ DB.del(id); });
+  SELECTED_IDS = {};
+  renderHome();
+}
+
+
 function importFile(){
   var inp = document.createElement('input');
   inp.type='file'; inp.accept='.json';
@@ -680,7 +728,9 @@ function applyCTText(text){
     /balthazar\s*(?:ст(?:\.\s*|\s+)?|степен[ьи]\s*)?([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i,
     /тип\s*([a-zA-Z\u0410-\u044f])\s*по\s*balthazar/i,
     /по\s*(?:balthazar|балтазар)\s*(?:ст\.?\s*)?([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i,
-    /(?:balthazar|балтазар)\s*(?:ст\.?\s*)([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i
+    /(?:balthazar|балтазар)\s*(?:ст\.?\s*)([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i,
+    /(?:ст\.?\s+)?([a-zA-Z\u0410-\u044f])\s+по\s+(?:balthazar|балтазар)/i,
+    /(?:ст\.?\s+)?([a-zA-Z\u0410-\u044f])\s*(?:\(.*?\))?\s*по\s+(?:balthazar|балтазар)/i
   ];
   var m = null;
   for(var bi=0;bi<baltPatterns.length;bi++){
@@ -1045,228 +1095,6 @@ function importFile(){
 // ПАРСЕР КТ-ЗАКЛЮЧЕНИЯ ИЗ WORD (.docx)
 // Офлайн — читает ZIP напрямую, без CDN
 // ═══════════════════════════════════════════════
-function importCTWord(){
-  var inp = document.createElement('input');
-  inp.type='file'; inp.accept='.docx,.doc';
-  inp.onchange = function(){
-    var f = inp.files[0]; if(!f) return;
-    var r = new FileReader();
-    r.onload = function(e){
-      try{
-        // Читаем docx как ZIP → извлекаем document.xml
-        var zip = _xlsxParser && _xlsxParser._readZip ? _xlsxParser._readZip(e.target.result) : null;
-        // Используем тот же ZIP-движок что и для XLSX
-        _readDocxText(e.target.result).then(function(text){
-          applyCTText(text);
-        }).catch(function(err){
-          alert('Ошибка чтения файла: '+err);
-        });
-      }catch(err){ alert('Ошибка: '+err.message); }
-    };
-    r.readAsArrayBuffer(f);
-  };
-  inp.click();
-}
-
-function _readDocxText(ab){
-  // docx = ZIP; ищем word/document.xml
-  return new Promise(function(resolve, reject){
-    try{
-      var u8 = new Uint8Array(ab);
-      var dv = new DataView(ab);
-      var len = u8.length;
-      // Ищем End of Central Directory
-      var eocd=-1;
-      for(var i=len-22;i>=Math.max(0,len-65536);i--){
-        if(dv.getUint32(i,true)===0x06054b50){eocd=i;break;}
-      }
-      if(eocd<0){reject('Не ZIP-архив');return;}
-      var cdOffset=dv.getUint32(eocd+16,true);
-      var cdCount=dv.getUint16(eocd+8,true);
-      var files={};
-      var pos=cdOffset;
-      for(var fi=0;fi<cdCount;fi++){
-        if(dv.getUint32(pos,true)!==0x02014b50) break;
-        var method=dv.getUint16(pos+10,true);
-        var csize=dv.getUint32(pos+20,true);
-        var usize=dv.getUint32(pos+24,true);
-        var fnLen=dv.getUint16(pos+28,true);
-        var exLen=dv.getUint16(pos+30,true);
-        var cmLen=dv.getUint16(pos+32,true);
-        var lhOff=dv.getUint32(pos+42,true);
-        var fname='';
-        for(var c=0;c<fnLen;c++) fname+=String.fromCharCode(u8[pos+46+c]);
-        files[fname]={method:method,csize:csize,usize:usize,lhOff:lhOff};
-        pos+=46+fnLen+exLen+cmLen;
-      }
-      function extract(name){
-        var e=files[name]; if(!e) return null;
-        var lh=e.lhOff;
-        var fnl=dv.getUint16(lh+26,true);
-        var exl=dv.getUint16(lh+28,true);
-        var ds=lh+30+fnl+exl;
-        var sl=u8.slice(ds,ds+e.csize);
-        if(e.method===0) return Promise.resolve(new TextDecoder('utf-8').decode(sl));
-        if(e.method===8){
-          return new Response(
-            new Blob([sl]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
-          ).arrayBuffer().then(function(a){return new TextDecoder('utf-8').decode(new Uint8Array(a));});
-        }
-        return null;
-      }
-      // Ищем document.xml
-      var docFile = files['word/document.xml'] ? 'word/document.xml' :
-                    Object.keys(files).find(function(k){return k.endsWith('document.xml');});
-      if(!docFile){reject('word/document.xml не найден');return;}
-      var p = extract(docFile);
-      if(!p){reject('Не удалось извлечь XML');return;}
-      Promise.resolve(p).then(function(xml){
-        // Убираем XML-теги, получаем чистый текст
-        var text = xml.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ')
-          .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"')
-          .replace(/&#x([0-9a-fA-F]+);/g,function(_,h){return String.fromCharCode(parseInt(h,16));});
-        resolve(text);
-      }).catch(reject);
-    }catch(ex){reject(ex.message);}
-  });
-}
-
-function applyCTText(text){
-  var t = text.toLowerCase();
-  var d = D(ST.tp);
-  var filled = [], warnings = [];
-
-  // ── 1. BALTHAZAR ──────────────────────────────
-  // КЛЮЧЕВОЙ МОМЕНТ: в российских КТ-заключениях КИРИЛЛИЧЕСКИЕ буквы:
-  // С (U+0421/0441) выглядит как латинская C, но это ДРУГОЙ КОД Unicode.
-  // Явно нормализуем кириллические омоглифы → латинские.
-  function normBalt(ch){
-    ch = ch.toLowerCase();
-    var cmap = {
-      '\u0430':'a',                    // кир а → A
-      '\u0432':'b', '\u0431':'b',     // кир в,б → B
-      '\u0441':'c', '\u0433':'c',     // кир с,г → C (с — главный случай!)
-      '\u0434':'d',                    // кир д → D
-      '\u0435':'e'                     // кир е → E
-    };
-    return cmap[ch] || ch;
-  }
-  var bmap = {'a':'0','b':'1','c':'2','d':'3','e':'4'};
-  var baltGrade = null;
-  // Ищем любую одиночную букву (лат. или кирилл.) после ключевых слов
-  var baltPatterns = [
-    /balthazar\s*(?:ст(?:\.\s*|\s+)?|степен[ьи]\s*)?([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i,
-    /тип\s*([a-zA-Z\u0410-\u044f])\s*по\s*balthazar/i,
-    /по\s*(?:balthazar|балтазар)\s*(?:ст\.?\s*)?([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i,
-    /(?:balthazar|балтазар)\s*(?:ст\.?\s*)([a-zA-Z\u0410-\u044f])(?:\b|\s|\))/i
-  ];
-  var m = null;
-  for(var bi=0;bi<baltPatterns.length;bi++){
-    m = t.match(baltPatterns[bi]);
-    if(m) break;
-  }
-  if(m){
-    var letter = normBalt(m[1]);
-    baltGrade = bmap[letter];
-    var gradeNames = {'0':'A — норма','1':'B — увеличение ПЖ','2':'C — воспаление клетчатки','3':'D — жидкостная зона','4':'E — ≥2 зон/газ'};
-    if(baltGrade !== undefined){
-      d.ctg = baltGrade;
-      filled.push('Balthazar '+gradeNames[baltGrade]);
-    } else {
-      warnings.push('Balthazar: буква «'+m[1]+'» (код '+m[1].charCodeAt(0)+') не распознана — укажите вручную');
-    }
-  } else {
-    warnings.push('Balthazar: степень не найдена в тексте — укажите вручную');
-  }
-
-  // ── 2. НЕКРОЗ ────────────────────────────────
-  // "некроз ... 40%", ">50%", "30-50", "менее 30", "отсутствует"
-  var necSet = false;
-  // Нет некроза
-  if(/некроз\s*(не\s*определяется|отсутствует|не\s*выявлен|не\s*выявлено)/i.test(text)){
-    d.nec='none'; filled.push('Некроз: нет (0%)'); necSet=true;
-  }
-  if(!necSet){
-    var necRe = /некро[зс][а-я]*\s*[\w\s%\/]*?([\d]+)\s*%/i;
-    var nm2 = text.match(necRe);
-    if(!nm2) nm2 = text.match(/([\d]+)\s*%\s*некро[зс]/i);
-    if(nm2){
-      var pct = parseInt(nm2[1]);
-      if(pct===0){d.nec='none';filled.push('Некроз: нет');}
-      else if(pct<30){d.nec='lt30';filled.push('Некроз: '+pct+'% (<30%)');}
-      else if(pct<=50){d.nec='30to50';filled.push('Некроз: '+pct+'% (30–50%)');}
-      else{d.nec='gt50';filled.push('Некроз: '+pct+'% (>50%)');}
-      necSet=true;
-    }
-    // Словесные описания
-    if(!necSet){
-      if(/более\s*50|свыше\s*50|>50|gt50/i.test(text)){d.nec='gt50';filled.push('Некроз: >50%');necSet=true;}
-      else if(/30.{0,5}50|умеренн|значительн/i.test(t)&&/некро/i.test(t)){d.nec='30to50';filled.push('Некроз: 30–50%');necSet=true;}
-      else if(/менее\s*30|<\s*30|до\s*30|треть|1\/3/i.test(text)&&/некро/i.test(t)){d.nec='lt30';filled.push('Некроз: <30%');necSet=true;}
-    }
-    // Если Balthazar C и некроз не описан → нет некроза
-    if(!necSet && baltGrade==='2'){d.nec='none';filled.push('Некроз: не описан → 0%');necSet=true;}
-    if(!necSet && (baltGrade==='0'||baltGrade==='1')){d.nec='none';necSet=true;}
-    if(!necSet) warnings.push('Некроз: не распознан — укажите вручную');
-  }
-
-  // ── 3. ВНЕПАНКРЕАТИЧЕСКИЕ ОСЛОЖНЕНИЯ ─────────
-  // выпот в брюшной/плевральной полости, тромбоз, псевдоаневризма, жидкость
-  var extKeys = ['выпот','жидкость в брюшн','жидкость в плевр','асцит','тромбоз',
-                 'псевдоаневризм','жидкостное скоплени','парапанкреатическ жидк',
-                 'инфильтрация перипанкреатич'];
-  var hasExt = extKeys.some(function(k){return t.indexOf(k)>=0;});
-  // Жидкостное образование в ПЖ само по себе — не внепанкр. осложнение (это D по Balthazar)
-  // НО перипанкреатическая инфильтрация с жидкостью — тоже не всегда +2
-  // Balthazar C с инфильтрацией — ext=no. D/E — ext уже в ctg.
-  // +2 за ext только если: выпот в полостях, тромбоз сосудов, псевдоаневризма
-  var extTrue = [
-    'выпот в плевр','плеврит','асцит','тромбоз','псевдоаневризм',
-    'жидкость в плевральн','левостороннего выпота','правостороннего выпота',
-    'двустороннего выпота'
-  ].some(function(k){return t.indexOf(k)>=0;});
-  if(extTrue){
-    d.ext='yes'; filled.push('Внепанкр. осложнения: есть (+2 б)');
-  } else {
-    d.ext='no';
-    if(hasExt) warnings.push('Выпот/жидкость в описании — уточните: внепанкреатические осложнения?');
-    filled.push('Внепанкр. осложнения: нет');
-  }
-
-  // ── 4. ПЛЕВРИТ (BISAP +1) ─────────────────────
-  var hasPleural = /плеврит|плевральный выпот|жидкость в плевр|гидроторакс/i.test(text);
-  if(hasPleural){
-    d.ple='yes'; filled.push('Плеврит: есть → +1 балл BISAP');
-  } else {
-    d.ple='no'; filled.push('Плеврит: не описан');
-  }
-
-  // ── 5. ПСЕВДОКИСТА / ВИРСУНГ (информативно) ──
-  var hasPseudo = /псевдокист/i.test(text);
-  var hasWirsung = /вирсунг|вирсунгоэктази|расширен\s*\w*\s*проток|проток\s*\w*\s*расширен/i.test(text);
-  if(hasPseudo) warnings.push('ℹ Псевдокиста — учтите при выборе тактики дренирования');
-  if(hasWirsung) warnings.push('ℹ Вирсунгоэктазия — риск стриктуры протока');
-
-  // ── ПРИМЕНЯЕМ ─────────────────────────────────
-  DB.saveCurrent(); R();
-
-  var msg = '✅ Из КТ-заключения заполнено:\n• '+filled.join('\n• ');
-  if(warnings.length) msg += '\n\n⚠️ Обратите внимание:\n• '+warnings.join('\n• ');
-
-  // Рассчитываем итог
-  var ctgN=parseInt(d.ctg)||0;
-  var necN={none:0,lt30:2,'30to50':4,gt50:6}[d.nec]||0;
-  var extN=d.ext==='yes'?2:0;
-  msg += '\n\nmCTSI = '+ctgN+' + '+necN+' + '+extN+' = '+(ctgN+necN+extN)+' / 10';
-  if(d.ple==='yes') msg += '\nПлеврит → BISAP пересчитан';
-
-  alert(msg);
-  // Переключить на вкладку КЩС/КТ для проверки
-  goto(STEPS.findIndex(function(s){return s.id==='gas';}));
-}
-
-
-
 function importFile(){
   var inp = document.createElement('input');
   inp.type='file'; inp.accept='.json';
@@ -1407,8 +1235,13 @@ function buildHome(){
       '</td>';
     }
 
-    return '<tr style="border-bottom:1px solid var(--bd);cursor:pointer;transition:.1s" '+
-        'onclick="openPatient(\''+p.id+'\')" onmouseover="this.style.background=\'var(--bg3)\'" onmouseout="this.style.background=\'\'">'+
+    var chk = SELECTED_IDS[p.id]?'checked':'';
+    return '<tr style="border-bottom:1px solid var(--bd);cursor:pointer;transition:.1s;background:'+(SELECTED_IDS[p.id]?'var(--bg3)':'')+'" '+
+        'onclick="openPatient(\''+p.id+'\')" onmouseover="this.style.background=\'var(--bg3)\'" onmouseout="this.style.background='+(SELECTED_IDS[p.id]?'\'var(--bg3)\'':'\'\'')+'">'+
+      '<td style="padding:6px 8px;text-align:center;border:1px solid var(--bd)" onclick="event.stopPropagation()">'+
+        '<input type="checkbox" '+chk+' onchange="SELECTED_IDS[\''+p.id+'\']= this.checked||undefined; if(!this.checked)delete SELECTED_IDS[\''+p.id+'\']; updateSelBar()" '+
+          'style="width:16px;height:16px;cursor:pointer;accent-color:var(--c)">'+
+      '</td>'+
       '<td style="padding:9px 10px;border:1px solid var(--bd)">'+
         '<div style="font-weight:800;font-size:15px;color:var(--c)">'+abbr+'</div>'+
         '<div style="font-size:11px;color:var(--t2)">'+makeShortName(p2.initials)+'</div>'+
@@ -1518,6 +1351,9 @@ function buildHome(){
     '<div style="overflow-x:auto;margin-bottom:18px">'+
       '<table style="width:100%;border-collapse:collapse;min-width:560px">'+
         '<thead><tr style="background:var(--bg2)">'+
+          '<th style="padding:6px 8px;text-align:center;border:1px solid var(--bd);width:32px" onclick="toggleSelectAll()">'+
+            '<input type="checkbox" id="chkAll" style="width:15px;height:15px;cursor:pointer;accent-color:var(--c)">'+
+          '</th>'+
           '<th style="padding:8px 10px;text-align:left;font-size:10px;color:var(--t2);text-transform:uppercase;letter-spacing:.06em;border:1px solid var(--bd)">Пациент</th>'+
           '<th style="padding:8px;font-size:10px;color:var(--t2);text-transform:uppercase;border:1px solid var(--bd)">Возр/Пол</th>'+
           '<th style="padding:8px;font-size:10px;color:var(--t2);text-transform:uppercase;border:1px solid var(--bd)">Этиол.</th>'+
@@ -1543,6 +1379,24 @@ function buildHome(){
       '<button onclick="cleanEmptyPatients()" '+
         'style="background:none;border:none;color:var(--t3);font-size:11px;cursor:pointer;text-decoration:underline;font-family:inherit">'+
         '🗑 Удалить пустые / тестовые записи</button>'+
+    '</div>':'')+
+  (total>1?
+    '<div id="selBar" style="display:none;position:sticky;bottom:16px;left:0;right:0;margin:10px 0;'+
+      'background:var(--c);color:#000;border-radius:12px;padding:12px 18px;'+
+      'display:flex;align-items:center;justify-content:space-between;gap:12px;'+
+      'box-shadow:0 4px 20px rgba(0,0,0,.18);z-index:100;flex-wrap:wrap">'+
+      '<span id="selCount" style="font-weight:700;font-size:14px">Выбрано: 0</span>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+        '<button onclick="exportSelectedXLSX()" '+
+          'style="padding:8px 16px;background:#000;color:var(--c);border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">'+
+          '📋 Экспорт выбранных в Excel</button>'+
+        '<button onclick="deleteSelected()" '+
+          'style="padding:8px 14px;background:#ef4343;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">'+
+          '🗑 Удалить выбранных</button>'+
+        '<button onclick="SELECTED_IDS={};renderHome()" '+
+          'style="padding:8px 12px;background:rgba(0,0,0,.2);color:#000;border:none;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit">'+
+          'Снять выделение</button>'+
+      '</div>'+
     '</div>':'')+
   '</div>';
 }
