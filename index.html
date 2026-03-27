@@ -251,6 +251,124 @@ function exportAllFile(){
   a.download = 'pancrea_все_пациенты_'+new Date().toISOString().slice(0,10)+'.json'; a.click();
 }
 
+function exportAllXLSX(){
+  var list = DB.load();
+  if(!list.length){ alert('Нет пациентов для выгрузки'); return; }
+
+  // ── Заголовки таблицы ────────────────────────────────────────────
+  var etioMap={biliary:'ЖКБ',aliment:'Алиментарный',hypertg:'Гипертриглицеридемия',
+    ercp:'ЭРХПГ',drug:'Медикаментозный',trauma:'Травма',autoimmune:'Аутоиммунный',idio:'Идиопатический'};
+
+  var tps = ['24h','48h','72h','96h'];
+  var labFields = [
+    {k:'wbc',   l:'Лейкоциты (10⁹/л)'},
+    {k:'hb',    l:'Гемоглобин (г/л)'},
+    {k:'hct',   l:'Гематокрит (%)'},
+    {k:'plt',   l:'Тромбоциты (10⁹/л)'},
+    {k:'creat', l:'Креатинин (мкмоль/л)'},
+    {k:'urea',  l:'Мочевина (ммоль/л)'},
+    {k:'gluc',  l:'Глюкоза (ммоль/л)'},
+    {k:'na',    l:'Натрий (ммоль/л)'},
+    {k:'k',     l:'Калий (ммоль/л)'},
+    {k:'ca',    l:'Кальций (ммоль/л)'},
+    {k:'bili',  l:'Билирубин (мкмоль/л)'},
+    {k:'alb',   l:'Альбумин (г/л)'},
+    {k:'tp',    l:'Общий белок (г/л)'},
+    {k:'ast',   l:'АСТ (Ед/л)'},
+    {k:'alt_val',l:'АЛТ (Ед/л)'},
+    {k:'ldh',   l:'ЛДГ (Ед/л)'},
+    {k:'crp',   l:'СРБ (мг/л)'},
+    {k:'pct',   l:'Прокальцитонин (нг/мл)'},
+    {k:'amylase_lab',l:'Амилаза (Ед/л)'},
+    {k:'inr',   l:'МНО'},
+    {k:'fibr',  l:'Фибриноген (г/л)'},
+    {k:'aptt',  l:'АПТВ (с)'},
+    {k:'temp',  l:'Температура (°C)'},
+    {k:'hr',    l:'ЧСС (уд/мин)'},
+    {k:'rr',    l:'ЧДД (в мин)'},
+    {k:'sbp',   l:'АД сист (мм рт.ст.)'},
+    {k:'uo',    l:'Диурез (мл/ч)'},
+  ];
+
+  // ── Строим шапку ─────────────────────────────────────────────────
+  var header1 = ['№','ФИО','Пол','Возраст','Этиология','Амилаза (пост.)'];
+  var header2 = ['','','','','',''];
+  tps.forEach(function(tp){
+    var tl = tp.replace('h',' ч');
+    // Шкалы
+    ['APACHE II','BISAP','SOFA','MCTSI','Ranson','Джанелидзе'].forEach(function(sc){
+      header1.push(tl); header2.push(sc);
+    });
+    // Лабораторные данные
+    labFields.forEach(function(f){
+      header1.push(tl); header2.push(f.l);
+    });
+  });
+
+  var rows = [header1, header2];
+
+  // ── Заполняем строки ──────────────────────────────────────────────
+  var origST = ST;
+  list.forEach(function(p, idx){
+    ST = p;
+    var p2 = p.pat||{};
+    var row = [
+      idx+1,
+      p2.initials||'—',
+      p2.sex==='m'?'М':p2.sex==='f'?'Ж':'—',
+      p2.age||'',
+      etioMap[p.etio]||'—',
+      p.diag&&p.diag.amylase ? p.diag.amylase : ''
+    ];
+
+    tps.forEach(function(tp){
+      var d = p.data&&p.data[tp] ? p.data[tp] : {};
+      var hasData = d.temp!==undefined||d.wbc!==undefined;
+
+      var sc={apache:0,bisap:0,sofa:0,mctsi:0};
+      var ran={score:0}, dzh={score:0};
+      try{ sc=calc(tp); }catch(e){}
+      try{ ran=calcRanson(); }catch(e){}
+      try{ dzh=calcDzhanelidge(tp); }catch(e){}
+
+      row.push(hasData?sc.apache:'');
+      row.push(hasData?sc.bisap:'');
+      row.push(hasData?sc.sofa:'');
+      row.push(hasData?sc.mctsi:'');
+      row.push(hasData?ran.score:'');
+      row.push(hasData?dzh.score:'');
+
+      labFields.forEach(function(f){
+        var v = d[f.k];
+        row.push((v!==undefined&&v!=='')?parseFloat(String(v).replace(',','.'))||v:'');
+      });
+    });
+
+    rows.push(row);
+  });
+  ST = origST;
+
+  // ── Генерируем CSV (как Excel через UTF-8 BOM) ────────────────────
+  var csv = '\uFEFF'; // BOM для корректного открытия в Excel
+  rows.forEach(function(row){
+    csv += row.map(function(cell){
+      var s = String(cell===null||cell===undefined?'':cell);
+      if(s.indexOf(',')>=0||s.indexOf('\n')>=0||s.indexOf('"')>=0){
+        s = '"'+s.replace(/"/g,'""')+'"';
+      }
+      return s;
+    }).join(';') + '\r\n';
+  });
+
+  var blob = new Blob([csv],{type:'text/csv;charset=utf-8'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'pancrea_пациенты_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
+}
+
+
 // Загрузить пациента(ов) из JSON-файла на диске
 function importFile(){
   var inp = document.createElement('input');
@@ -688,6 +806,22 @@ function importXLSX(){
 }
 
 function applyEMIACRows(rows){
+  // ── Если вызвано с главной страницы — создаём нового пациента ───────
+  if(VIEW !== 'patient'){
+    DB.saveCurrent(); // сохранить текущего пациента, если был открыт
+    ST = {
+      id:null, step:0, tp:'24h',
+      diag:{pain:false,enzymes:false,imaging:false,amylase:'',lipase:'',imgType:''},
+      etio:'', onset:'', onsetT:'',
+      pat:{initials:'',sex:'',age:'',height:'',weight:'',chronicYes:false,chronic:'none',chronicDetails:''},
+      data:{'24h':{},'48h':{},'72h':{},'96h':{}},
+      rem:{},
+      dr:{inf:false,timing:'late',loc:'perigastric',nec:'small',stab:'stable'},
+      surg:{gender:'',necrosis:'',character:'',wall:'',crp:'',failure:'',volume:''},
+      surgCalcDone:false
+    };
+    VIEW = 'patient';
+  }
   // ── Маппинг: начало названия (lowercase) → поле Pancrea-Score ──────
   var MAP = [
     {key:'мочевина',                              f:'urea'},
@@ -800,8 +934,17 @@ function applyEMIACRows(rows){
          nameCell.startsWith('общий (клинический) анализ мочи') ||
          nameCell.startsWith('коагулограмма')) return;
 
-      // Значение: приоритет колонке D (Мариинская), затем B, C
-      var valRaw = row['D']||row['B']||row['C']||'';
+      // Значение: ищем первую колонку с чистым числом (без единиц вроде 10^9/л, %, Ед/л)
+      // Мариинская: D=результат; Боткина и др.: B=результат, D=единицы измерения
+      function isPureNum(s){
+        if(!s) return false;
+        return /^-?\d+([.,]\d+)?$/.test(String(s).trim());
+      }
+      var valRaw = '';
+      ['D','B','C'].forEach(function(col){
+        if(!valRaw && isPureNum(row[col])) valRaw = row[col];
+      });
+      if(!valRaw) valRaw = row['D']||row['B']||row['C']||'';
       var numVal = getNum(valRaw);
 
       if(numVal !== null){
@@ -840,7 +983,7 @@ function applyEMIACRows(rows){
   if(patAge  && !ST.pat.age)     { ST.pat.age=patAge;        filled++; }
 
   if(filled>0){
-    DB.saveCurrent(); R();
+    DB.saveCurrent(); renderFull();
     var msg = '✅ Загружено из ЕМИАЦ:\n\n';
     msg += tpFilled.join('\n');
     if(patName) msg += '\n\nПациент: '+patName;
@@ -1356,6 +1499,9 @@ function buildHome(){
       '<button onclick="exportAllFile()" '+
         'style="padding:10px 12px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:9px;font-size:13px;cursor:pointer;font-family:inherit">'+
         '💾 Резервная копия</button>'+
+      '<button onclick="exportAllXLSX()" '+
+        'style="padding:10px 12px;background:#e3f2fd;color:#1565c0;border:1px solid #90caf9;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit">'+
+        '📋 Экспорт в Excel</button>'+
     '</div>'+
   '</div>'+
 
