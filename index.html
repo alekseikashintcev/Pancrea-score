@@ -163,7 +163,17 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
     <div class="logo-t">Pancrea-Score</div>
     <div class="logo-s">Острый Панкреатит · Оценка тяжести</div>
   </div>
-  <button id="homebtn" onclick="goHome()" style="margin-left:auto;background:var(--bg3);border:1px solid var(--bd2);color:var(--t2);padding:5px 11px;border-radius:7px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap">👥 Пациенты</button>
+  <div id="homeTabNav" style="margin-left:auto;display:flex;gap:6px;align-items:center">
+    <button id="alertNavBtn" onclick="switchHomeTab('alerts')"
+      style="padding:6px 13px;background:var(--c);color:#000;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap">
+      🔔 Сводка</button>
+    <button id="patientsNavBtn" onclick="switchHomeTab('patients')"
+      style="padding:6px 13px;background:var(--bg3);color:var(--t2);border:1px solid var(--bd);border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap">
+      👥 Пациенты</button>
+    <button id="homebtn" onclick="goHome()"
+      style="display:none;background:var(--bg3);border:1px solid var(--bd2);color:var(--t2);padding:5px 11px;border-radius:7px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap">
+      👥 Пациенты</button>
+  </div>
   <div id="dbadge" class="dbadge warn" style="margin-left:8px">⚠ 0/3</div>
 </div>
 <div class="snav" id="snav"></div>
@@ -174,6 +184,7 @@ input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-
 // PANCREA-SCORE  ·  Система управления пациентами
 // ═══════════════════════════════════════════════════════════════
 var VIEW = 'home'; // 'home' | 'patient'
+var HOME_TAB = 'alerts'; // 'alerts' | 'patients' — default is dashboard
 var SELECTED_IDS = {}; // id -> true for checked patients
 var SELECTED_IDS = {}; // id -> true for checked patients
 
@@ -1140,30 +1151,187 @@ function goHome(){
   VIEW='home';
   renderFull();
 }
-function openPatient(id){
+function openPatient(id, stepId){
   var rec = DB.get(id);
   if(!rec) return;
   ST = JSON.parse(JSON.stringify(rec));
   if(typeof ST.step!=='number') ST.step=0;
   VIEW='patient';
   renderFull();
+  if(stepId){ var si=STEPS.findIndex(function(s){return s.id===stepId;}); if(si>=0) setTimeout(function(){ goto(si); },80); }
   window.scrollTo(0,0);
 }
 function renderFull(){
-  var hb = document.getElementById('homebtn');
+  var hb  = document.getElementById('homebtn');
   var badge = document.getElementById('dbadge');
   var nav = document.getElementById('snav');
+  var tabNav = document.getElementById('homeTabNav');
   var isP = VIEW==='patient';
-  if(hb) hb.style.display = isP?'':'none';
-  if(badge) badge.style.display = isP?'':'none';
-  if(nav) nav.style.display = isP?'':'none';
-  if(VIEW==='home') renderHome();
+  // homebtn (legacy, hidden in patient view via tabNav)
+  if(hb)  hb.style.display = 'none';
+  if(badge) badge.style.display = isP ? '' : 'none';
+  if(nav)   nav.style.display   = isP ? '' : 'none';
+  if(tabNav) tabNav.style.display = isP ? 'none' : 'flex';
+  if(VIEW==='home'){ renderHome(); }
   else R();
 }
 
 // ── ДОМ: СПИСОК ПАЦИЕНТОВ ────────────────────────────────────────
+
+
+function buildAlertDash(){
+  var all = getAllAlerts();
+  var list = DB.load();
+  var total = list.length;
+
+  // Stats
+  var origST = ST;
+  var heavyCount = 0;
+  list.forEach(function(p){
+    ST = JSON.parse(JSON.stringify(p));
+    var tps = ['96h','72h','48h','24h'];
+    for(var i=0;i<tps.length;i++){
+      try {
+        var d = p.data && p.data[tps[i]];
+        if(!d || d.temp === undefined) continue;
+        var sc = calc(tps[i]);
+        if(sc.apache >= 8 || sc.bisap >= 3 || sc.sofa >= 6){ heavyCount++; break; }
+      } catch(e) {}
+    }
+  });
+  ST = origST;
+
+  var crit  = all.filter(function(x){ return x.alert.priority==='critical'; });
+  var warn  = all.filter(function(x){ return x.alert.priority==='warn'; });
+  var info  = all.filter(function(x){ return x.alert.priority==='info'; });
+
+  function alertCard(item){
+    var a = item.alert, p = item.patient;
+    var p2 = p.pat||{};
+    var pname = p2.initials || '—';
+    var age   = p2.age ? p2.age+'л' : '';
+    var bc = a.priority==='critical' ? 'var(--r)' : a.priority==='warn' ? '#d97706' : 'var(--t3)';
+    var bg = a.priority==='critical' ? '#fff1f1' : a.priority==='warn' ? '#fffbeb' : 'var(--bg2)';
+    var br = a.priority==='critical' ? '1px solid #fca5a5' : a.priority==='warn' ? '1px solid #fcd34d' : '1px solid var(--bd)';
+    return '<div style="background:'+bg+';border:'+br+';border-radius:10px;padding:12px 14px;margin-bottom:8px;display:flex;align-items:flex-start;gap:12px">'+
+      '<div style="font-size:24px;flex-shrink:0;line-height:1.1">'+a.icon+'</div>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="font-weight:700;font-size:13px;color:'+bc+'">'+a.title+'</div>'+
+        '<div style="font-size:12px;color:var(--t);margin:3px 0">'+a.body+'</div>'+
+        '<div style="font-size:11px;color:var(--t3);margin-top:2px">'+
+          '👤 '+pname+(age?' · '+age:'')+
+        '</div>'+
+      '</div>'+
+      '<div style="display:flex;flex-direction:column;gap:5px;flex-shrink:0">'+
+        '<button onclick="openPatient(\''+p.id+'\',\''+a.action+'\')" '+
+          'style="padding:5px 12px;background:var(--c);color:#000;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap">'+
+          '→ Открыть</button>'+
+        '<button onclick="dismissAlert(\''+p.id+'\',\''+a.type+'\',\''+a.sub+'\')" '+
+          'style="padding:4px 8px;background:none;border:1px solid var(--bd);border-radius:7px;font-size:11px;color:var(--t3);cursor:pointer;font-family:inherit">'+
+          'Скрыть ✕</button>'+
+      '</div>'+
+    '</div>';
+  }
+
+  // ── Stat cards row
+  var sc1bg = crit.length ? '#fff1f1' : 'var(--bg2)';
+  var sc1bc = crit.length ? 'var(--r)' : 'var(--bd)';
+  var statCards =
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:20px">'+
+      '<div style="background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:14px 16px;text-align:center">'+
+        '<div style="font-size:28px;font-weight:800;color:var(--c)">'+total+'</div>'+
+        '<div style="font-size:11px;color:var(--t2);margin-top:2px">Пациентов</div>'+
+      '</div>'+
+      '<div style="background:'+sc1bg+';border:1px solid '+sc1bc+';border-radius:10px;padding:14px 16px;text-align:center">'+
+        '<div style="font-size:28px;font-weight:800;color:var(--r)">'+crit.length+'</div>'+
+        '<div style="font-size:11px;color:var(--t2);margin-top:2px">Критических</div>'+
+      '</div>'+
+      '<div style="background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:14px 16px;text-align:center">'+
+        '<div style="font-size:28px;font-weight:800;color:var(--y)">'+warn.length+'</div>'+
+        '<div style="font-size:11px;color:var(--t2);margin-top:2px">Предупреждений</div>'+
+      '</div>'+
+      '<div style="background:var(--bg2);border:1px solid var(--bd);border-radius:10px;padding:14px 16px;text-align:center">'+
+        '<div style="font-size:28px;font-weight:800;color:var(--r)">'+heavyCount+'</div>'+
+        '<div style="font-size:11px;color:var(--t2);margin-top:2px">Тяжёлых</div>'+
+      '</div>'+
+    '</div>';
+
+  function section(title, items){
+    if(!items.length) return '';
+    return '<div style="margin-bottom:20px">'+
+      '<div style="font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--t2);margin-bottom:8px">'+title+'</div>'+
+      items.map(alertCard).join('')+
+    '</div>';
+  }
+
+  var noAlerts = !all.length ? (
+    '<div style="text-align:center;padding:48px 20px;background:var(--bg2);border-radius:14px;border:1px solid var(--bd)">'+
+      '<div style="font-size:48px;margin-bottom:12px">✅</div>'+
+      '<div style="font-size:18px;font-weight:700;color:var(--t2)">Всё в порядке</div>'+
+      '<div style="font-size:13px;color:var(--t3);margin-top:6px">Нет активных уведомлений</div>'+
+    '</div>'
+  ) : '';
+
+  return '<div class="fi-anim" style="padding-bottom:30px">'+
+    '<div style="padding:16px 0 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">'+
+      '<div>'+
+        '<div style="font-size:22px;font-weight:800;color:var(--t)">🏥 Сводка дежурного</div>'+
+        '<div style="font-size:12px;color:var(--t2);margin-top:3px">'+
+          new Date().toLocaleString('ru-RU',{weekday:'short',day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'})+
+        '</div>'+
+      '</div>'+
+      '<div style="display:flex;gap:7px;flex-wrap:wrap">'+
+        '<button onclick="ALERT_DISMISSED={};saveDismissed();renderHome()" '+
+          'style="padding:7px 12px;background:none;border:1px solid var(--bd);border-radius:8px;font-size:12px;color:var(--t3);cursor:pointer;font-family:inherit">'+
+          '↺ Сбросить скрытые</button>'+
+        '<button onclick="startNew()" '+
+          'style="padding:7px 14px;background:var(--c);color:#000;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit">'+
+          '+ Новый пациент</button>'+
+      '</div>'+
+    '</div>'+
+    statCards+
+    noAlerts+
+    section('🚨 Критические — требуют действий сейчас', crit)+
+    section('⚠️ Предупреждения', warn)+
+    section('ℹ️ Информационные', info)+
+  '</div>';
+}
+
+function updateHeaderAlertBadge(){
+  var btn = document.getElementById('alertNavBtn');
+  if(!btn) return;
+  var bc = alertBadgeCount();
+  if(bc.total === 0){
+    btn.innerHTML = '🔔 Сводка';
+    btn.style.background = HOME_TAB==='alerts' ? 'var(--c)' : 'var(--bg3)';
+    btn.style.color = HOME_TAB==='alerts' ? '#000' : 'var(--t2)';
+  } else {
+    var col = bc.crit ? 'var(--r)' : '#d97706';
+    btn.innerHTML = '🔔 Сводка <span style="background:'+col+';color:#fff;padding:1px 7px;border-radius:10px;font-size:11px;margin-left:4px">'+bc.total+'</span>';
+    btn.style.background = HOME_TAB==='alerts' ? 'var(--c)' : 'var(--bg3)';
+    btn.style.color = HOME_TAB==='alerts' ? '#000' : 'var(--t2)';
+  }
+  var pBtn = document.getElementById('patientsNavBtn');
+  if(pBtn){
+    pBtn.style.background = HOME_TAB==='patients' ? 'var(--c)' : 'var(--bg3)';
+    pBtn.style.color = HOME_TAB==='patients' ? '#000' : 'var(--t2)';
+  }
+}
+
+function switchHomeTab(tab){
+  HOME_TAB = tab;
+  renderHome();
+  window.scrollTo(0,0);
+}
+
+// toggleAlertDash replaced by switchHomeTab
 function renderHome(){
-  document.getElementById('main').innerHTML = buildHome();
+  if(HOME_TAB === 'alerts'){
+    document.getElementById('main').innerHTML = buildAlertDash();
+  } else {
+    document.getElementById('main').innerHTML = buildHome();
+  }
+  updateHeaderAlertBadge();
 }
 
 function patAbbr(initials){
@@ -1243,7 +1411,10 @@ function buildHome(){
           'style="width:16px;height:16px;cursor:pointer;accent-color:var(--c)">'+
       '</td>'+
       '<td style="padding:9px 10px;border:1px solid var(--bd)">'+
-        '<div style="font-weight:800;font-size:15px;color:var(--c)">'+abbr+'</div>'+
+        '<div style="display:flex;align-items:center;gap:6px">'+
+          '<div style="font-weight:800;font-size:15px;color:var(--c)">'+abbr+'</div>'+
+          (function(){ var pa=computePatientAlerts(p); var pc=pa.filter(function(a){return a.priority==='critical';}).length; var pw=pa.filter(function(a){return a.priority==='warn';}).length; if(!pc&&!pw) return ''; var bg=pc?'var(--r)':'var(--y)'; return '<span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:10px;background:'+bg+';color:#fff">'+(pc||'')+(pc&&pw?'·':'')+(pw||'')+'</span>'; })()+ 
+        '</div>'+
         '<div style="font-size:11px;color:var(--t2)">'+makeShortName(p2.initials)+'</div>'+
       '</td>'+
       '<td style="padding:9px 8px;font-size:12px;border:1px solid var(--bd)">'+
@@ -1309,9 +1480,9 @@ function buildHome(){
   // ── Сборка страницы
   return '<div class="fi-anim" style="padding-bottom:30px">'+
 
-  '<div style="padding:18px 0 14px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">'+
+  '<div style="padding:18px 0 14px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">'+ 
     '<div>'+
-      '<div style="font-size:24px;font-weight:800;color:var(--t)">👥 Пациенты</div>'+
+      '<div style="font-size:24px;font-weight:800;color:var(--t)">👥 Пациенты</div>'+ 
       '<div style="font-size:12px;color:var(--t2);margin-top:4px">'+
         'Всего: <b>'+total+'</b> &nbsp;·&nbsp; '+
         '<span style="color:var(--r)">Тяжёлых: '+heavy+'</span> &nbsp;·&nbsp; '+
@@ -1677,6 +1848,362 @@ function calcDzhanelidge(tp){
   return {score,crit,sev,sevLbl};
 }
 
+
+
+// ═══════════════════════════════════════════════════════════════════
+// 🔔 ALERT ENGINE — система уведомлений и рекомендаций
+// ═══════════════════════════════════════════════════════════════════
+
+var ALERT_DISMISSED = {}; // key → timestamp of dismissal
+
+function alertKey(pid, type, sub){ return pid+'|'+type+'|'+(sub||''); }
+
+function loadDismissed(){
+  try{ ALERT_DISMISSED = JSON.parse(localStorage.getItem('_alerts_dismissed')||'{}'); }catch(e){ ALERT_DISMISSED={}; }
+}
+function saveDismissed(){
+  try{ localStorage.setItem('_alerts_dismissed', JSON.stringify(ALERT_DISMISSED)); }catch(e){}
+}
+function dismissAlert(pid, type, sub){
+  var k = alertKey(pid, type, sub);
+  ALERT_DISMISSED[k] = Date.now();
+  saveDismissed();
+  renderHome();
+}
+function isDismissed(pid, type, sub){
+  var k = alertKey(pid, type, sub);
+  var ts = ALERT_DISMISSED[k];
+  if(!ts) return false;
+  // Автоснятие: критические — через 1 ч, обычные — через 8 ч
+  var ttl = (type==='critical'||type==='lab_crit') ? 3600000 : 28800000;
+  return (Date.now() - ts) < ttl;
+}
+
+// ── Пороговые значения лабораторных показателей ─────────────────────
+var LAB_THRESHOLDS = [
+  { f:'wbc',   lo:null, hi:15,   unit:'10⁹/л', name:'Лейкоциты',    priHi:'critical' },
+  { f:'wbc',   lo:3,    hi:null, unit:'10⁹/л', name:'Лейкоциты',    priLo:'warn'     },
+  { f:'crp',   lo:null, hi:150,  unit:'мг/л',  name:'СРБ',          priHi:'critical' },
+  { f:'pct',   lo:null, hi:2,    unit:'нг/мл', name:'Прокальцитонин',priHi:'critical' },
+  { f:'creat', lo:null, hi:177,  unit:'мкмоль/л',name:'Креатинин',  priHi:'critical' },
+  { f:'gluc',  lo:null, hi:11,   unit:'ммоль/л', name:'Глюкоза',    priHi:'warn'     },
+  { f:'gluc',  lo:3.5,  hi:null, unit:'ммоль/л', name:'Глюкоза',    priLo:'critical' },
+  { f:'ca',    lo:2.0,  hi:null, unit:'ммоль/л', name:'Кальций',    priLo:'warn'     },
+  { f:'hb',    lo:80,   hi:null, unit:'г/л',     name:'Гемоглобин', priLo:'critical' },
+  { f:'plt',   lo:100,  hi:null, unit:'10⁹/л',   name:'Тромбоциты', priLo:'warn'     },
+  { f:'bili',  lo:null, hi:85,   unit:'мкмоль/л',name:'Билирубин',  priHi:'warn'     },
+  { f:'inr',   lo:null, hi:1.5,  unit:'',        name:'МНО',        priHi:'warn'     },
+  { f:'urea',  lo:null, hi:10,   unit:'ммоль/л', name:'Мочевина',   priHi:'warn'     },
+  { f:'alb',   lo:25,   hi:null, unit:'г/л',     name:'Альбумин',   priLo:'warn'     },
+];
+
+// ── Основная функция вычисления алертов для одного пациента ─────────
+function computePatientAlerts(p){
+  var alerts = [];
+  var origST = ST;
+  // Deep copy so D() mutations don't corrupt the stored patient
+  ST = JSON.parse(JSON.stringify(p));
+  var tps = ['24h','48h','72h','96h'];
+  var admittedAt = p.savedAt || Date.now();
+  var hoursSince = (Date.now() - admittedAt) / 3600000;
+
+  // ── 1. ВРЕМЕННЫ́Е НАПОМИНАНИЯ (взять анализы) ──────────────────────
+  var tpWindows = [
+    { tp:'24h', fromH:20,  toH:28  },
+    { tp:'48h', fromH:44,  toH:52  },
+    { tp:'72h', fromH:68,  toH:76  },
+    { tp:'96h', fromH:92,  toH:100 },
+  ];
+  tpWindows.forEach(function(w){
+    if(hoursSince >= w.fromH){
+      var d = p.data && p.data[w.tp];
+      var hasLabs = d && (d.wbc !== undefined && d.wbc !== '');
+      if(!hasLabs && hoursSince <= w.toH + 24){
+        alerts.push({
+          priority: hoursSince <= w.toH ? 'warn' : 'info',
+          type: 'time_labs',
+          sub: w.tp,
+          icon: '🧪',
+          title: 'Взять анализы ' + w.tp.replace('h',' ч'),
+          body: 'Пора взять лабораторный контроль (временная точка ' + w.tp.replace('h',' ч') + ')',
+          action: 'labs'
+        });
+      }
+    }
+  });
+
+  // ── 2. КРИТИЧЕСКИЕ ЗНАЧЕНИЯ АНАЛИЗОВ ──────────────────────────────
+  tps.forEach(function(tp){
+    var d = p.data && p.data[tp];
+    if(!d) return;
+    LAB_THRESHOLDS.forEach(function(th){
+      var val = parseFloat(String(d[th.f]||'').replace(',','.'));
+      if(isNaN(val)) return;
+      if(th.hi !== null && val > th.hi){
+        alerts.push({
+          priority: th.priHi || 'warn',
+          type: 'lab_crit',
+          sub: tp+'_'+th.f+'_hi',
+          icon: th.priHi==='critical' ? '🚨' : '⚠️',
+          title: th.name + ' ↑ (' + tp.replace('h',' ч') + ')',
+          body: th.name + ' = ' + val + ' ' + th.unit + ' (порог >' + th.hi + ') — ' + tp.replace('h',' ч'),
+          action: 'labs'
+        });
+      }
+      if(th.lo !== null && val < th.lo){
+        alerts.push({
+          priority: th.priLo || 'warn',
+          type: 'lab_crit',
+          sub: tp+'_'+th.f+'_lo',
+          icon: th.priLo==='critical' ? '🚨' : '⚠️',
+          title: th.name + ' ↓ (' + tp.replace('h',' ч') + ')',
+          body: th.name + ' = ' + val + ' ' + th.unit + ' (порог <' + th.lo + ') — ' + tp.replace('h',' ч'),
+          action: 'labs'
+        });
+      }
+    });
+  });
+
+  // ── 3. ЭСКАЛАЦИЯ ПО ШКАЛАМ ────────────────────────────────────────
+  tps.forEach(function(tp){
+    var d = p.data && p.data[tp];
+    if(!d || d.temp === undefined) return;
+    var sc, ran, dzh;
+    try { sc = calc(tp); } catch(e) { return; }
+    try { ran = calcRanson(); } catch(e) { ran = {score:0}; }
+
+    if(sc.apache >= 8){
+      alerts.push({ priority:'critical', type:'scale', sub:tp+'_apache',
+        icon:'🚨', title:'APACHE II ≥ 8 (' + tp.replace('h',' ч') + ')',
+        body:'APACHE II = '+sc.apache+' — тяжёлый панкреатит, рассмотреть перевод в ОРИТ',
+        action:'scores' });
+    } else if(sc.apache >= 5){
+      alerts.push({ priority:'warn', type:'scale', sub:tp+'_apache5',
+        icon:'⚠️', title:'APACHE II ' + sc.apache + ' (' + tp.replace('h',' ч') + ')',
+        body:'APACHE II = '+sc.apache+' — нарастание тяжести, усилить мониторинг',
+        action:'scores' });
+    }
+    if(sc.bisap >= 3){
+      alerts.push({ priority:'critical', type:'scale', sub:tp+'_bisap',
+        icon:'🚨', title:'BISAP ≥ 3 (' + tp.replace('h',' ч') + ')',
+        body:'BISAP = '+sc.bisap+' — высокий риск органной недостаточности',
+        action:'scores' });
+    }
+    if(sc.sofa >= 6){
+      alerts.push({ priority:'critical', type:'scale', sub:tp+'_sofa',
+        icon:'🚨', title:'SOFA ≥ 6 (' + tp.replace('h',' ч') + ')',
+        body:'SOFA = '+sc.sofa+' — полиорганная недостаточность, интенсивная терапия',
+        action:'scores' });
+    }
+    if(ran.score >= 3){
+      alerts.push({ priority:'warn', type:'scale', sub:tp+'_ranson',
+        icon:'⚠️', title:'Ranson ≥ 3 (' + tp.replace('h',' ч') + ')',
+        body:'Ranson = '+ran.score+' — неблагоприятный прогноз',
+        action:'scores' });
+    }
+  });
+
+  // ── 4. КТ НЕ ВЫПОЛНЕНА ────────────────────────────────────────────
+  if(hoursSince >= 48){
+    var hasCT = tps.some(function(tp){
+      var d = p.data && p.data[tp];
+      return d && d.ctg !== undefined && d.ctg !== '';
+    });
+    if(!hasCT){
+      alerts.push({ priority:'warn', type:'ct_missing', sub:'ct',
+        icon:'🩻', title:'КТ не выполнена (>48 ч)',
+        body:'Прошло более 48 часов — рассмотреть КТ брюшной полости с к/в для оценки Balthazar/mCTSI',
+        action:'gas' });
+    }
+  }
+
+  // ── 5. ТЕРАПЕВТИЧЕСКИЕ РЕКОМЕНДАЦИИ ──────────────────────────────
+  // 5а. Инфекция + нет заметки об антибиотиках
+  var hasSepsisMarkers = tps.some(function(tp){
+    var d = p.data && p.data[tp];
+    if(!d) return false;
+    var pct = parseFloat(String(d.pct||'').replace(',','.'));
+    var crp = parseFloat(String(d.crp||'').replace(',','.'));
+    return (!isNaN(pct) && pct > 2) || (!isNaN(crp) && crp > 200);
+  });
+  if(hasSepsisMarkers){
+    var remText = (p.rem && (p.rem.abx||p.rem.abxNote||p.rem.notes||'')).toLowerCase();
+    var hasAbxNote = /антибиот|антимикроб|меропенем|имипенем|ципроф|метронидаз/i.test(remText);
+    if(!hasAbxNote){
+      alerts.push({ priority:'critical', type:'therapy', sub:'abx',
+        icon:'💊', title:'Признаки инфицированного некроза',
+        body:'ПКТ>2 или СРБ>200 — рассмотреть антибактериальную терапию (карбапенемы)',
+        action:'rem' });
+    }
+  }
+  // 5б. Нутритивная поддержка
+  var has72hData = p.data && p.data['72h'] && p.data['72h'].wbc !== undefined;
+  if(has72hData && hoursSince >= 72){
+    var remText2 = (p.rem && JSON.stringify(p.rem)).toLowerCase();
+    var hasNutrNote = /нутри|зонд|энтерал|парентерал|питани/i.test(remText2);
+    if(!hasNutrNote){
+      alerts.push({ priority:'info', type:'therapy', sub:'nutrition',
+        icon:'🥗', title:'Нутритивная поддержка (>72 ч)',
+        body:'После 72 ч — зафиксируйте нутритивную поддержку (энтеральное/парентеральное питание)',
+        action:'rem' });
+    }
+  }
+  // 5в. Дренирование при инфицированном некрозе
+  var hasInfectedNec = p.dr && p.dr.inf === true;
+  var hasDrain = p.dr && (p.dr.drainDone || false);
+  if(hasInfectedNec && !hasDrain){
+    alerts.push({ priority:'critical', type:'therapy', sub:'drain',
+      icon:'🩺', title:'Инфицированный некроз — дренирование',
+      body:'Отмечен инфицированный некроз — необходимо решение о дренировании/некрэктомии',
+      action:'drain' });
+  }
+
+  ST = origST;
+
+  // Фильтруем уже отклонённые
+  return alerts.filter(function(a){
+    return !isDismissed(p.id, a.type, a.sub);
+  });
+}
+
+// ── Суммарные алерты по всем пациентам ──────────────────────────────
+function getAllAlerts(){
+  var list = DB.load();
+  var result = [];
+  var origST = ST;
+  list.forEach(function(p){
+    var as = computePatientAlerts(p);
+    as.forEach(function(a){ result.push({ patient:p, alert:a }); });
+  });
+  ST = origST;
+  return result;
+}
+
+// ── Browser Notifications ────────────────────────────────────────────
+var _lastNotifKeys = {};
+
+function requestNotifPermission(){
+  if(!('Notification' in window)) return;
+  if(Notification.permission === 'default'){
+    Notification.requestPermission();
+  }
+}
+
+function fireNotifications(){
+  if(!('Notification' in window)) return;
+  if(Notification.permission === 'default'){
+    Notification.requestPermission();
+    return;
+  }
+  if(Notification.permission !== 'granted') return;
+  var all = getAllAlerts();
+  all.forEach(function(item){
+    var a = item.alert, p = item.patient;
+    var k = alertKey(p.id, a.type, a.sub);
+    if(_lastNotifKeys[k]) return; // уже показали в эту сессию
+    if(a.priority === 'critical' || a.priority === 'warn'){
+      _lastNotifKeys[k] = true;
+      var pname = (p.pat && p.pat.initials) ? p.pat.initials.split(' ')[0] : 'Пациент';
+      try{
+        var n = new Notification('🏥 ' + pname + ': ' + a.title, {
+          body: a.body,
+          icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><text y="28" font-size="28">🏥</text></svg>',
+          tag: k,
+          requireInteraction: a.priority === 'critical'
+        });
+        n.onclick = function(){ window.focus(); n.close(); };
+      }catch(e){}
+    }
+  });
+}
+
+// ── Инициализация уведомлений ────────────────────────────────────────
+function initAlerts(){
+  loadDismissed();
+  requestNotifPermission();
+  // Проверка каждые 10 минут
+  setInterval(function(){
+    fireNotifications();
+  }, 600000);
+  // Первый запуск через 3 секунды
+  setTimeout(fireNotifications, 3000);
+}
+
+// ── Счётчик алертов для бейджа ────────────────────────────────────────
+function alertBadgeCount(){
+  var all = getAllAlerts();
+  var crit = all.filter(function(x){ return x.alert.priority==='critical'; }).length;
+  var warn = all.filter(function(x){ return x.alert.priority==='warn'; }).length;
+  return { crit:crit, warn:warn, total:all.length };
+}
+
+// ── Страница алертов (дашборд) ────────────────────────────────────────
+function pageAlerts(){
+  var all = getAllAlerts();
+  if(!all.length){
+    return '<div class="fi-anim" style="text-align:center;padding:60px 20px;color:var(--t3)">'+
+      '<div style="font-size:52px;margin-bottom:16px">✅</div>'+
+      '<div style="font-size:20px;font-weight:700;color:var(--t2)">Нет активных уведомлений</div>'+
+      '<div style="font-size:13px;margin-top:8px">Все пациенты в норме</div>'+
+    '</div>';
+  }
+
+  // Группируем по приоритету
+  var crit  = all.filter(function(x){ return x.alert.priority==='critical'; });
+  var warn  = all.filter(function(x){ return x.alert.priority==='warn'; });
+  var info  = all.filter(function(x){ return x.alert.priority==='info'; });
+
+  function alertRow(item){
+    var a = item.alert, p = item.patient;
+    var pname = (p.pat && p.pat.initials) ? p.pat.initials : '—';
+    var bc = a.priority==='critical' ? 'var(--r)' : a.priority==='warn' ? 'var(--y)' : 'var(--t3)';
+    var bg = a.priority==='critical' ? '#fff5f5' : a.priority==='warn' ? '#fffbf0' : 'var(--bg2)';
+    return '<div style="display:flex;align-items:flex-start;gap:12px;padding:12px 14px;'+
+      'background:'+bg+';border-left:4px solid '+bc+';border-radius:0 8px 8px 0;margin-bottom:6px">'+
+      '<div style="font-size:22px;line-height:1.2">'+a.icon+'</div>'+
+      '<div style="flex:1;min-width:0">'+
+        '<div style="font-weight:700;font-size:13px;color:var(--t)">'+a.title+'</div>'+
+        '<div style="font-size:12px;color:var(--t2);margin:2px 0">'+a.body+'</div>'+
+        '<div style="font-size:11px;color:var(--t3);margin-top:3px">👤 '+pname+'</div>'+
+      '</div>'+
+      '<div style="display:flex;gap:6px;flex-shrink:0">'+
+        '<button onclick="openPatient(\''+p.id+'\',\''+a.action+'\')" '+
+          'style="padding:5px 10px;background:var(--c);color:#000;border:none;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:inherit">'+
+          '→ Открыть</button>'+
+        '<button onclick="dismissAlert(\''+p.id+'\',\''+a.type+'\',\''+a.sub+'\')" '+
+          'style="padding:5px 8px;background:none;border:1px solid var(--bd);border-radius:6px;font-size:11px;color:var(--t3);cursor:pointer;font-family:inherit">'+
+          '✕</button>'+
+      '</div>'+
+    '</div>';
+  }
+
+  function section(title, items, color){
+    if(!items.length) return '';
+    return '<div style="margin-bottom:18px">'+
+      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;'+
+        'color:'+color+';margin-bottom:8px;padding:0 2px">'+title+' ('+items.length+')</div>'+
+      items.map(alertRow).join('')+
+    '</div>';
+  }
+
+  return '<div class="fi-anim" style="padding-bottom:30px">'+
+    '<div style="padding:16px 0 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'+
+      '<div>'+
+        '<div style="font-size:22px;font-weight:800;color:var(--t)">🔔 Уведомления</div>'+
+        '<div style="font-size:12px;color:var(--t2);margin-top:3px">Активных: '+all.length+
+          (crit.length ? ' · <span style="color:var(--r);font-weight:700">Критических: '+crit.length+'</span>' : '')+
+        '</div>'+
+      '</div>'+
+      '<button onclick="ALERT_DISMISSED={};saveDismissed();renderHome()" '+
+        'style="padding:7px 14px;background:none;border:1px solid var(--bd);border-radius:8px;'+
+        'font-size:12px;color:var(--t3);cursor:pointer;font-family:inherit">'+
+        '↺ Сбросить скрытые</button>'+
+    '</div>'+
+    section('🚨 Критические', crit, 'var(--r)')+
+    section('⚠️ Предупреждения', warn, '#b45309')+
+    section('ℹ️ Информационные', info, 'var(--t3)')+
+  '</div>';
+}
 
 var STEPS=[
   {id:'diag',   lbl:'Диагноз',    ico:'🩻'},
@@ -3096,6 +3623,53 @@ function inpUnit(lbl,type,id,val,unit,oninput,onblur,hint){
 // ═══════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════
+initAlerts();
+
+// ── SERVICE WORKER (background push notifications) ──────────────────
+(function registerServiceWorker(){
+  if(!('serviceWorker' in navigator)) return;
+  var swCode = [
+    'var CACHE_ALERTS = "pancrea-alerts-v1";',
+    'self.addEventListener("push", function(e){',
+    '  var data = {};',
+    '  try{ data = e.data.json(); }catch(ex){ data = {title:"Pancrea-Score", body: e.data ? e.data.text() : "Уведомление"}; }',
+    '  e.waitUntil(self.registration.showNotification(data.title||"Pancrea-Score",{',
+    '    body: data.body||"",',
+    '    icon: data.icon||"",',
+    '    badge: data.badge||"",',
+    '    requireInteraction: data.requireInteraction||false,',
+    '    tag: data.tag||"pancrea",',
+    '    data: data',
+    '  }));',
+    '});',
+    'self.addEventListener("notificationclick", function(e){',
+    '  e.notification.close();',
+    '  e.waitUntil(clients.matchAll({type:"window"}).then(function(cls){',
+    '    if(cls.length){ cls[0].focus(); return; }',
+    '    return clients.openWindow("/");',
+    '  }));',
+    '});',
+    // Periodic background check via sync
+    'self.addEventListener("periodicsync", function(e){',
+    '  if(e.tag === "pancrea-check") e.waitUntil(Promise.resolve());',
+    '});',
+  ].join("\n");
+  var blob = new Blob([swCode], {type:"application/javascript"});
+  var swUrl = URL.createObjectURL(blob);
+  navigator.serviceWorker.register(swUrl, {scope: '/'}).then(function(reg){
+    console.log("[Pancrea] SW registered");
+    // Request notification permission proactively
+    if(Notification && Notification.permission === 'default'){
+      Notification.requestPermission().then(function(p){
+        if(p === 'granted') console.log("[Pancrea] Notifications granted");
+      });
+    }
+  }).catch(function(err){
+    // SW from blob may fail in some browsers; fall back to in-page only
+    console.log("[Pancrea] SW not available:", err.message);
+  });
+})();
+
 if(!importLink()){
   renderFull(); // Показываем список пациентов
 }
