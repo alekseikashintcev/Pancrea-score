@@ -1562,8 +1562,30 @@ function sDR(tp,k,v){ D(tp)[k]=v; DB.saveCurrent(); R(); }
 // Пациент
 function sP(k,v){ ST.pat[k]=v; }
 function sPR(k,v){ ST.pat[k]=v; DB.saveCurrent(); R(); }
-// После потери фокуса — полная перерисовка + автосохранение
-function onBlur(){ DB.saveCurrent(); R(); }
+// Обновить только badge + nav (без перерисовки контента)
+function updateNavBadge(){
+  var abbr=getPatAbbr();
+  var cnt=critCnt(),ok=confirmed();
+  var b=document.getElementById('dbadge');
+  if(b){ b.className='dbadge '+(ok?'ok':'warn'); b.textContent=(abbr?abbr+' · ':'')+(ok?'✅ ОП подтверждён ('+cnt+'/3)':'⚠ Диагноз: '+cnt+'/3'); }
+  var nav=document.getElementById('snav');
+  if(nav){ nav.innerHTML=STEPS.map(function(s,i){
+    var locked=i>0&&!ok;
+    var cls='sb'+(ST.step===i?' active':'')+(i<ST.step&&!locked?' done':'')+(locked?' locked':'');
+    var dot=i<ST.step&&!locked?'✓':(i+1);
+    return '<button class="'+cls+'" onclick="goto('+i+')"'+(locked?' disabled':'')+'>'+
+      '<span class="snum">'+dot+'</span>'+s.ico+' '+s.lbl+'</button>';
+  }).join(''); }
+}
+
+// После потери фокуса — только сохранение + обновление хинтов и бейджа.
+// Никакого renderContent() — иначе DOM перестраивается до обработки
+// следующего клика или Tab, что требует двойного клика и ломает Tab-навигацию.
+function onBlur(){
+  DB.saveCurrent();
+  updateNavBadge();
+  updateHints();
+}
 
 // ═══════════════════════════════════════════════
 // КОНВЕРТАЦИИ (единицы СИ)
@@ -2149,26 +2171,12 @@ function critCnt(){ return (ST.diag.pain?1:0)+(ST.diag.enzymes?1:0)+(ST.diag.ima
 // RENDER CONTROLLER
 // ═══════════════════════════════════════════════
 function R(){
-  // Обновляем только badge и nav — без потери фокуса если уже в контенте
-  var abbr=getPatAbbr();
-  var cnt=critCnt(),ok=confirmed();
-  var b=document.getElementById('dbadge');
-  b.className='dbadge '+(ok?'ok':'warn');
-  b.textContent=(abbr?abbr+' · ':'')+(ok?'✅ ОП подтверждён ('+cnt+'/3)':'⚠ Диагноз: '+cnt+'/3');
-
-  // Nav
-  var nav=document.getElementById('snav');
-  nav.innerHTML=STEPS.map(function(s,i){
-    var locked=i>0&&!ok;
-    var cls='sb'+(ST.step===i?' active':'')+(i<ST.step&&!locked?' done':'')+(locked?' locked':'');
-    var dot=i<ST.step&&!locked?'✓':(i+1);
-    return '<button class="'+cls+'" onclick="goto('+i+')"'+(locked?' disabled':'')+'>'+
-      '<span class="snum">'+dot+'</span>'+s.ico+' '+s.lbl+'</button>';
-  }).join('');
-
-  // Content — только если нет активного input в фокусе
+  updateNavBadge();
+  // Перерисовываем контент только если фокус НЕ внутри формы —
+  // иначе лишь обновляем хинты, не трогая DOM с полями ввода.
   var focused=document.activeElement;
-  var inInput=focused&&(focused.tagName==='INPUT'||focused.tagName==='SELECT')&&focused.closest('#main');
+  var tag=focused?focused.tagName:'';
+  var inInput=(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA')&&focused.closest('#main');
   if(!inInput){
     DB.saveCurrent();
     renderContent();
@@ -3510,9 +3518,10 @@ function dInp(lbl,tp,key,unit,opts){
   opts=opts||{};
   var val=D(tp)[key]||'';
   var extra=(opts.min?' min="'+opts.min+'"':'')+(opts.max?' max="'+opts.max+'"':'')+(opts.step?' step="'+opts.step+'"':' step="any"');
+  var fieldId='dinp_'+tp+'_'+key;
   return '<div class="fl"><div class="flb">'+lbl+'</div>'+
     '<div class="fw">'+
-      '<input class="fi'+(unit?' u':'')+'" type="text" inputmode="decimal" placeholder="—" value="'+val+'" '+extra+
+      '<input id="'+fieldId+'" class="fi'+(unit?' u':'')+'" type="text" inputmode="decimal" placeholder="—" value="'+val+'" '+extra+
         ' oninput="sD(\''+tp+'\',\''+key+'\',this.value)"'+
         ' onblur="onBlur()"'+
         ' onfocus="this.select()">'+
@@ -3546,6 +3555,33 @@ function inpUnit(lbl,type,id,val,unit,oninput,onblur,hint){
 // ═══════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════
+// ── TAB-НАВИГАЦИЯ ВНУТРИ ФОРМЫ ─────────────────────────────────────
+// Перехватываем Tab, пока фокус внутри #main — браузер перейдёт к
+// следующему / предыдущему полю внутри текущей страницы, не уходя
+// в кнопки верхней навигации (.snav).
+document.addEventListener('keydown', function(e){
+  if(e.key !== 'Tab') return;
+  var focused = document.activeElement;
+  if(!focused || !focused.closest('#main')) return;
+  // Собираем все видимые, не отключённые поля внутри #main в порядке DOM
+  var inputs = Array.prototype.slice.call(
+    document.querySelectorAll('#main input:not([disabled]):not([type=hidden]), #main select:not([disabled]), #main textarea:not([disabled])')
+  ).filter(function(el){
+    // Пропускаем скрытые элементы
+    return el.offsetParent !== null;
+  });
+  if(!inputs.length) return;
+  var idx = inputs.indexOf(focused);
+  if(idx === -1) return;
+  e.preventDefault();
+  var next = e.shiftKey ? inputs[idx - 1] : inputs[idx + 1];
+  if(next){
+    next.focus();
+    // Выделяем всё содержимое при Tab-переходе — удобно для замены значения
+    try{ if(typeof next.select === 'function') next.select(); }catch(ex){}
+  }
+});
+
 initAlerts();
 
 // ── SERVICE WORKER (background push notifications) ──────────────────
